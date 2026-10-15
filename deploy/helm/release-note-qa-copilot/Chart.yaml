@@ -2,8 +2,8 @@ apiVersion: v2
 name: release-note-qa-copilot
 description: Turn changelog and ticket exports into sourced, QA-checked release-note drafts.
 type: application
-version: 0.11.0
-appVersion: "0.11.0"
+version: 0.12.0
+appVersion: "0.12.0"
 home: https://github.com/anomalyco/release-note-qa-copilot
 sources:
   - https://github.com/anomalyco/release-note-qa-copilot

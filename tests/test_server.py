@@ -80,10 +80,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["format"], "json")
 
-    def test_version_is_0_11_0(self):
+    def test_version_is_0_12_0(self):
         status, body = self._get("/api/version")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["version"], "0.11.0")
+        self.assertEqual(json.loads(body)["version"], "0.12.0")
 
     def test_config_sample_endpoint(self):
         status, body = self._get("/api/config/sample")
@@ -652,6 +652,151 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertIn(b"nope", body)
+
+    def test_generate_includes_score_and_gate(self):
+        status, result = self._post(
+            "/api/generate",
+            {"content": sample("csv")["content"], "format": "csv"},
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("score", result)
+        self.assertIn("band", result["score"])
+        self.assertIn("penalties", result["score"])
+        self.assertEqual(result["gate"], {"status": "pass", "reasons": []})
+
+    def test_diff_includes_score_and_gate(self):
+        previous = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Fast and reliable,SRC-A,https://a\n"
+        )
+        current = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Reliable and fast,,\n"
+        )
+        status, result = self._post(
+            "/api/diff",
+            {
+                "previous": previous,
+                "current": current,
+                "format": "csv",
+                "config": {"min_score": 95, "max_high": 0},
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("score", result)
+        self.assertEqual(result["gate"], result["score"]["gate"])
+        self.assertEqual(result["gate"]["status"], "fail")
+        self.assertTrue(result["gate"]["reasons"])
+
+    def test_generate_gate_fails_below_min_score(self):
+        status, result = self._post(
+            "/api/generate",
+            {
+                "content": self.VAGUE,
+                "format": "csv",
+                "config": {"min_score": 95, "max_high": 0},
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["gate"]["status"], "fail")
+        self.assertTrue(result["gate"]["reasons"])
+        self.assertEqual(result["score"]["gate"], result["gate"])
+
+    def test_generate_rejects_invalid_gate_type(self):
+        status, result = self._post_status(
+            "/api/generate",
+            {
+                "content": sample("csv")["content"],
+                "config": {"min_score": "high"},
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", result)
+
+    def test_generate_rejects_out_of_range_gate(self):
+        status, result = self._post_status(
+            "/api/generate",
+            {
+                "content": sample("csv")["content"],
+                "config": {"min_score": 101},
+            },
+        )
+        self.assertEqual(status, 400)
+
+    def test_export_score_csv_endpoint(self):
+        status, headers, body = self._get_export_raw(
+            "/api/export/score.csv", {"content": self.VAGUE, "format": "csv"}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/csv"))
+        self.assertIn("attachment", headers["Content-Disposition"])
+        self.assertIn("release-score.csv", headers["Content-Disposition"])
+        rows = list(csv.reader(io.StringIO(body.decode("utf-8"))))
+        self.assertEqual(rows[0], ["code", "severity", "count", "points"])
+        payload = build_draft(self.VAGUE, "csv")
+        self.assertEqual(len(rows), 1 + len(payload["score"]["penalties"]))
+
+    def test_export_score_csv_header_only_when_clean(self):
+        status, _headers, body = self._get_export_raw(
+            "/api/export/score.csv", {"content": self.CLEAN, "format": "csv"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body.decode("utf-8"), "code,severity,count,points\n")
+
+    def test_export_score_json_matches_payload(self):
+        status, headers, body = self._get_export_raw(
+            "/api/export/score.json", {"content": self.VAGUE, "format": "csv"}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("application/json"))
+        self.assertIn("attachment", headers["Content-Disposition"])
+        exported = json.loads(body.decode("utf-8"))
+        self.assertEqual(exported, build_draft(self.VAGUE, "csv")["score"])
+
+    def test_export_score_applies_profile_gate(self):
+        status, _headers, body = self._get_export_raw(
+            "/api/export/score.json",
+            {"content": self.VAGUE, "format": "csv", "profile": "strict"},
+        )
+        self.assertEqual(status, 200)
+        exported = json.loads(body.decode("utf-8"))
+        self.assertEqual(exported["gate"]["status"], "fail")
+
+    def test_export_score_accepts_diff_pair(self):
+        previous = self.CLEAN
+        current = self.VAGUE
+        status, _headers, body = self._get_export_raw(
+            "/api/export/score.csv",
+            {"previous": previous, "current": current, "format": "csv"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(body.decode("utf-8").startswith("code,severity,count,points"))
+
+    def test_export_score_missing_content_is_400(self):
+        status, _headers, body = self._get_export_raw(
+            "/api/export/score.csv", {"format": "csv"}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn(b"error", body)
+
+    def test_export_score_unparseable_is_422(self):
+        status, _headers, _body = self._get_export_raw(
+            "/api/export/score.json",
+            {"content": "foo,bar\n1,2\n", "format": "csv"},
+        )
+        self.assertEqual(status, 422)
+
+    def test_export_score_invalid_config_is_400(self):
+        status, _headers, body = self._get_export_raw(
+            "/api/export/score.csv",
+            {
+                "content": self.CLEAN,
+                "format": "csv",
+                "config": json.dumps({"min_score": 500}),
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn(b"error", body)
 
     def test_export_invalid_format_is_400(self):
         status, _headers, _body = self._get_export_raw(

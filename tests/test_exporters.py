@@ -5,10 +5,13 @@ import unittest
 
 from releasenote.exporters import (
     DIFF_HEADER,
+    SCORE_HEADER,
     checklist_csv,
     diff_csv,
     draft_json,
     qa_flags_csv,
+    score_csv,
+    score_json,
 )
 from releasenote.service import build_diff, build_draft, sample
 
@@ -122,6 +125,69 @@ class DraftJsonTests(unittest.TestCase):
         payload = {"title": "Version \u00e9t\u00e9", "entries": []}
         decoded = json.loads(draft_json(payload))
         self.assertEqual(decoded["title"], "Version \u00e9t\u00e9")
+
+
+class ScoreCsvTests(unittest.TestCase):
+    def test_header_and_one_row_per_penalty(self):
+        payload = build_draft(sample("csv")["content"], "csv")
+        rows = _rows(score_csv(payload))
+        self.assertEqual(rows[0], list(SCORE_HEADER))
+        self.assertEqual(rows[0], ["code", "severity", "count", "points"])
+        self.assertEqual(len(rows), 1 + len(payload["score"]["penalties"]))
+
+    def test_rows_match_payload_penalties(self):
+        payload = build_draft(
+            sample("csv")["content"], "csv", profile="strict"
+        )
+        rows = _rows(score_csv(payload))
+        by_code = {row[0]: row for row in rows[1:]}
+        for penalty in payload["score"]["penalties"]:
+            self.assertEqual(
+                by_code[penalty["code"]],
+                [
+                    penalty["code"],
+                    penalty["severity"],
+                    str(penalty["count"]),
+                    str(penalty["points"]),
+                ],
+            )
+
+    def test_missing_score_returns_header_only(self):
+        rows = _rows(score_csv({}))
+        self.assertEqual(rows, [list(SCORE_HEADER)])
+
+    def test_clean_draft_returns_header_only(self):
+        payload = build_draft(
+            "id,type,title,description,benefit,source\n"
+            "A,fix,Fix login,Login no longer fails,Reliable access,A\n",
+            "csv",
+        )
+        self.assertEqual(_rows(score_csv(payload)), [list(SCORE_HEADER)])
+
+
+class ScoreJsonTests(unittest.TestCase):
+    def test_matches_payload_score_object(self):
+        payload = build_draft(sample("csv")["content"], "csv")
+        decoded = json.loads(score_json(payload))
+        self.assertEqual(decoded, payload["score"])
+
+    def test_stable_sorted_key_order(self):
+        payload = build_draft(
+            sample("csv")["content"], "csv", profile="strict"
+        )
+        text = score_json(payload)
+        self.assertEqual(
+            text,
+            json.dumps(
+                payload["score"],
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            ),
+        )
+
+    def test_missing_score_is_empty_object(self):
+        self.assertEqual(json.loads(score_json({})), {})
 
 
 if __name__ == "__main__":

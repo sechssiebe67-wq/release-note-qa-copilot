@@ -10,7 +10,7 @@ never silently disables a review rule.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .models import SEVERITY_HIGH, SEVERITY_LOW, SEVERITY_MEDIUM
 
@@ -24,6 +24,8 @@ KNOWN_KEYS = (
     "required_sections",
     "banned_phrases",
     "severity_overrides",
+    "min_score",
+    "max_high",
 )
 
 _LIST_KEYS = (
@@ -32,6 +34,36 @@ _LIST_KEYS = (
     "required_sections",
     "banned_phrases",
 )
+
+
+def _parse_int(
+    payload: Dict[str, Any],
+    key: str,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> Optional[int]:
+    """Validate an optional integer gate field, returning ``None`` when unset.
+
+    ``bool`` is rejected even though it subclasses ``int`` so ``true`` is never
+    silently treated as ``1``. Wrong types and out-of-range values raise
+    :class:`ValueError`, matching the strictness of the other config fields.
+    """
+    if key not in payload:
+        return None
+    value = payload[key]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("config '{}' must be an integer".format(key))
+    if minimum is not None and value < minimum:
+        raise ValueError(
+            "config '{}' must be >= {}".format(key, minimum)
+        )
+    if maximum is not None and value > maximum:
+        raise ValueError(
+            "config '{}' must be <= {}".format(key, maximum)
+        )
+    return value
 
 
 @dataclass
@@ -50,6 +82,11 @@ class WorkspaceConfig:
         Maps a flag code to ``high``/``medium``/``low``.
     banned_phrases:
         Literal phrases that must never appear in a release note.
+    min_score:
+        Optional release-readiness gate: fail when the score is below it.
+    max_high:
+        Optional release-readiness gate: fail when the high-severity flag count
+        exceeds it.
     """
 
     extra_vague_terms: List[str] = field(default_factory=list)
@@ -57,6 +94,8 @@ class WorkspaceConfig:
     required_sections: List[str] = field(default_factory=list)
     severity_overrides: Dict[str, str] = field(default_factory=dict)
     banned_phrases: List[str] = field(default_factory=list)
+    min_score: Optional[int] = None
+    max_high: Optional[int] = None
 
     @classmethod
     def default(cls) -> "WorkspaceConfig":
@@ -108,32 +147,48 @@ class WorkspaceConfig:
                 )
             cleaned[code.strip()] = severity
 
+        min_score = _parse_int(payload, "min_score", minimum=0, maximum=100)
+        max_high = _parse_int(payload, "max_high", minimum=0)
+
         return cls(
             extra_vague_terms=lists["extra_vague_terms"],
             allow_terms=lists["allow_terms"],
             required_sections=lists["required_sections"],
             banned_phrases=lists["banned_phrases"],
             severity_overrides=cleaned,
+            min_score=min_score,
+            max_high=max_high,
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        """Return a JSON-serialisable representation of the config."""
-        return {
+        """Return a JSON-serialisable representation of the config.
+
+        The optional gate fields are only included when set, so a config
+        without a gate still round-trips to the historical shape.
+        """
+        result: Dict[str, Any] = {
             "extra_vague_terms": list(self.extra_vague_terms),
             "allow_terms": list(self.allow_terms),
             "required_sections": list(self.required_sections),
             "banned_phrases": list(self.banned_phrases),
             "severity_overrides": dict(self.severity_overrides),
         }
+        if self.min_score is not None:
+            result["min_score"] = self.min_score
+        if self.max_high is not None:
+            result["max_high"] = self.max_high
+        return result
 
     def is_default(self) -> bool:
-        """True when no rule is customised."""
+        """True when no rule or gate is customised."""
         return not (
             self.extra_vague_terms
             or self.allow_terms
             or self.required_sections
             or self.banned_phrases
             or self.severity_overrides
+            or self.min_score is not None
+            or self.max_high is not None
         )
 
 
@@ -145,4 +200,6 @@ def sample_config() -> Dict[str, Any]:
         "required_sections": ["feature", "breaking"],
         "banned_phrases": ["world's best", "guaranteed"],
         "severity_overrides": {"vague_language": "high"},
+        "min_score": 85,
+        "max_high": 0,
     }

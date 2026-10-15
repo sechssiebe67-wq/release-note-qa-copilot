@@ -25,6 +25,7 @@ from .profiles import (
     rule_summary,
 )
 from .qa import analyze_entries, checklist
+from .score import compute_score
 from .storage import ReviewStore
 from .templates import (
     ReleaseTemplate,
@@ -97,6 +98,7 @@ def _assemble(
     template = template or default_template()
     groups = group_entries(entries)
     titles = group_titles()
+    score = compute_score(qa, entries, workspace)
     return {
         "title": title.strip() or "Release Notes",
         "entry_count": len(entries),
@@ -115,6 +117,8 @@ def _assemble(
         "profile": profile,
         "template": template_summary(template),
         "rules": rule_summary(entries, qa, workspace, template),
+        "score": score,
+        "gate": score["gate"],
         "markdown": render_markdown(title, entries, qa, template),
     }
 
@@ -511,6 +515,7 @@ def get_shared_draft(
             "updated_at": review_record.updated_at,
         }
 
+    score = compute_score(qa, entries, workspace)
     return {
         "draft_id": draft_id,
         "title": record.get("title", ""),
@@ -519,6 +524,8 @@ def get_shared_draft(
         "checklist": checklist(entries, qa),
         "rules": rule_summary(entries, qa, workspace, template),
         "template": template_summary(template),
+        "score": score,
+        "gate": score["gate"],
         "review": review,
         "created_at": record.get("created_at", ""),
     }

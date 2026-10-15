@@ -5,6 +5,7 @@ from unittest import mock
 from releasenote.config import WorkspaceConfig, sample_config
 from releasenote.importer import ParseError
 from releasenote.models import Flag, QAResult
+from releasenote.profiles import resolve_config
 from releasenote.service import (
     HistoryRequiredError,
     build_diff,
@@ -51,6 +52,45 @@ class BuildDraftTests(unittest.TestCase):
         )
         result = build_draft(content, "csv")
         self.assertTrue(result["qa"]["publishable"])
+
+    def test_clean_draft_scores_100_ready_and_passes_gate(self):
+        content = (
+            "id,type,title,description,benefit,source\n"
+            "A,fix,Fix login,Login no longer fails,Reliable access,A\n"
+        )
+        result = build_draft(content, "csv")
+        self.assertEqual(result["score"]["score"], 100)
+        self.assertEqual(result["score"]["band"], "ready")
+        self.assertEqual(result["score"]["penalties"], [])
+        self.assertEqual(result["gate"], {"status": "pass", "reasons": []})
+
+    def test_score_and_gate_present_in_payload(self):
+        result = build_draft(sample("csv")["content"], "csv")
+        self.assertIn("score", result)
+        self.assertIn("gate", result)
+        self.assertEqual(result["gate"], result["score"]["gate"])
+
+    def test_gate_fails_for_failing_policy(self):
+        content = (
+            "id,type,title,description,benefit,source\n"
+            "A,fix,Better sync,The sync is improved,"
+            "A much better experience,A\n"
+        )
+        result = build_draft(
+            content, "csv", config={"min_score": 90, "max_high": 0}
+        )
+        self.assertEqual(result["gate"]["status"], "fail")
+        self.assertTrue(result["gate"]["reasons"])
+
+    def test_strict_profile_gate_is_effective(self):
+        content = (
+            "id,type,title,description,benefit,source\n"
+            "A,fix,Better sync,The sync is improved,"
+            "A much better experience,A\n"
+        )
+        result = build_draft(content, "csv", config=resolve_config({"profile": "strict"}))
+        self.assertEqual(result["config"]["min_score"], 85)
+        self.assertEqual(result["gate"]["status"], "fail")
 
 
 class WorkspaceConfigServiceTests(unittest.TestCase):
@@ -199,6 +239,20 @@ class BuildDiffTests(unittest.TestCase):
     def test_build_draft_has_no_diff_key(self):
         result = build_draft(sample("csv")["content"], "csv")
         self.assertNotIn("diff", result)
+
+    def test_build_diff_includes_score_and_gate(self):
+        current = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Reliable and fast,,\n"
+            "B,fix,Beta,Beta description,Gamma value,SRC-B,\n"
+        )
+        result = build_diff(self.PREVIOUS, current, "csv")
+        self.assertIn("score", result)
+        self.assertIn("gate", result)
+        self.assertEqual(result["gate"], result["score"]["gate"])
+        # The regression flag from the diff is folded into the score.
+        self.assertTrue(result["score"]["penalties"])
+        self.assertFalse(result["qa"]["publishable"])
 
 
 class GetSharedDraftTests(unittest.TestCase):

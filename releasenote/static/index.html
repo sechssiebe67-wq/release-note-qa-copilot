@@ -243,6 +243,8 @@
 
     <section>
       <div class="summary" id="summary"></div>
+      <div class="summary" id="scoreSummary"></div>
+      <div id="scorePenalties" class="muted"></div>
       <div class="summary" id="configSummary"></div>
       <div class="summary" id="rulesSummary"></div>
       <ul class="checklist" id="checklist"></ul>
@@ -363,6 +365,8 @@
         <button id="downloadRulesJson" class="secondary" type="button">Download rules JSON</button>
         <button id="downloadTemplateCsv" class="secondary" type="button">Download template CSV</button>
         <button id="downloadTemplateJson" class="secondary" type="button">Download template JSON</button>
+        <button id="downloadScoreCsv" class="secondary" type="button">Download score CSV</button>
+        <button id="downloadScoreJson" class="secondary" type="button">Download score JSON</button>
         <button id="downloadDiffCsv" class="secondary" type="button" hidden>Download diff CSV</button>
       </div>
       <pre id="markdown" aria-live="polite"></pre>
@@ -589,6 +593,35 @@
       }
     }
 
+    function bandClass(band) {
+      if (band === "ready") return "pass";
+      if (band === "review") return "medium";
+      return "high";
+    }
+
+    function renderScore(result) {
+      const score = result.score || {};
+      const gate = result.gate || score.gate || {};
+      const band = score.band || "";
+      const status = gate.status || "pass";
+      $("scoreSummary").innerHTML =
+        '<span class="pill">score: ' + esc(score.score) + '/100</span>' +
+        '<span class="pill ' + bandClass(band) + '">band: ' + esc(band) + '</span>' +
+        '<span class="pill ' + (status === "pass" ? "pass" : "high") + '">gate: ' + esc(status) + '</span>' +
+        ((gate.reasons && gate.reasons.length)
+          ? '<span class="muted">' + esc(gate.reasons.join("; ")) + '</span>'
+          : "");
+      const penalties = score.penalties || [];
+      $("scorePenalties").innerHTML = penalties.length
+        ? '<div class="muted">Penalties (top ' + esc(Math.min(penalties.length, 5)) + ')</div>' +
+          penalties.slice(0, 5).map(p =>
+            '<div class="flag ' + esc(p.severity) + '"><strong>' + esc(p.code) +
+            '</strong> — ' + esc(p.count) + ' × ' + esc(p.severity) +
+            ' (' + esc(p.points) + ' pts)</div>'
+          ).join("")
+        : '<div class="muted">No penalties — clean draft.</div>';
+    }
+
     function renderResult(result) {
       const counts = result.qa.counts;
       $("summary").innerHTML =
@@ -599,6 +632,7 @@
         '<span class="pill medium">' + esc(counts.medium) + ' medium</span>' +
         '<span class="pill">' + esc(counts.total) + ' flags</span>';
 
+      renderScore(result);
       $("configSummary").innerHTML = renderConfig(result.config);
       $("rulesSummary").innerHTML = renderRules(result.rules);
 
@@ -741,9 +775,10 @@
       if (typeof value === "boolean") return value ? "true" : "false";
       if (typeof value === "number") {
         if (!isFinite(value)) throw new Error("non-finite number");
-        // sourced_ratio and its deltas are the only float fields; Python
-        // renders integral floats as "1.0" rather than "1".
-        return key === "sourced_ratio" ? pyFloat(value) : String(value);
+        // sourced_ratio and score penalty points are the only float fields;
+        // Python renders integral floats as "1.0" rather than "1".
+        return (key === "sourced_ratio" || key === "points")
+          ? pyFloat(value) : String(value);
       }
       if (typeof value === "string") return JSON.stringify(value);
       if (Array.isArray(value)) {
@@ -853,6 +888,29 @@
       if (!lastResult) return;
       saveBlob("release-template.json",
         stableJson(buildTemplateExport(lastResult), null), "application/json");
+    }
+
+    function buildScoreCsv(score) {
+      const data = score || {};
+      const rows = (data.penalties || []).map(p =>
+        [p.code, p.severity, p.count, pyFloat(p.points)]
+      );
+      return buildCsv(["code", "severity", "count", "points"], rows);
+    }
+
+    function buildScoreJson(score) {
+      return stableJson(score || {}, null);
+    }
+
+    function downloadScoreCsv() {
+      if (!lastResult || !lastResult.score) return;
+      saveBlob("release-score.csv", buildScoreCsv(lastResult.score), "text/csv");
+    }
+
+    function downloadScoreJson() {
+      if (!lastResult || !lastResult.score) return;
+      saveBlob("release-score.json",
+        buildScoreJson(lastResult.score), "application/json");
     }
 
     function parseTrendInput(text) {
@@ -1372,6 +1430,8 @@
     $("downloadRulesJson").addEventListener("click", downloadRulesJson);
     $("downloadTemplateCsv").addEventListener("click", downloadTemplateCsv);
     $("downloadTemplateJson").addEventListener("click", downloadTemplateJson);
+    $("downloadScoreCsv").addEventListener("click", downloadScoreCsv);
+    $("downloadScoreJson").addEventListener("click", downloadScoreJson);
     $("analyzeTrend").addEventListener("click", analyzeTrend);
     $("loadTrendSample").addEventListener("click", loadTrendSample);
     $("downloadTrendCsv").addEventListener("click", downloadTrendCsv);

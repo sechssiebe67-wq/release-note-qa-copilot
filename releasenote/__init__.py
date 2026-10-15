@@ -47,6 +47,7 @@ from .diff import diff_drafts, compute_diff
 from .trend import compute_trend
 from .compare import compute_comparison
 from .profile_compare import compare_profiles
+from .score import compute_score
 from .exporters import (
     checklist_csv,
     comparison_csv,
@@ -59,6 +60,8 @@ from .exporters import (
     qa_flags_csv,
     rules_csv,
     rules_json,
+    score_csv,
+    score_json,
     template_csv,
     template_json,
     trend_csv,
@@ -122,6 +125,9 @@ __all__ = [
     "build_comparison",
     "compare_profiles",
     "build_profile_comparison",
+    "compute_score",
+    "score_csv",
+    "score_json",
     "qa_flags_csv",
     "checklist_csv",
     "diff_csv",
@@ -145,4 +151,4 @@ __all__ = [
     "HistoryRequiredError",
 ]
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
