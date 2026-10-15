@@ -9,8 +9,15 @@ from .diff import compute_diff
 from .generator import render_markdown
 from .grouping import group_entries, group_titles
 from .importer import parse_entries, sample_csv, sample_json
-from .models import ChangeEntry, QAResult
+from .models import (
+    REVIEW_PENDING,
+    REVIEW_STATUSES,
+    ChangeEntry,
+    QAResult,
+    ReviewRecord,
+)
 from .qa import analyze_entries, checklist
+from .storage import ReviewStore
 
 ConfigInput = Optional[Union[WorkspaceConfig, Dict[str, Any]]]
 
@@ -128,3 +135,55 @@ def sample(fmt: str = "csv") -> Dict[str, str]:
 def sample_workspace_config() -> Dict[str, Any]:
     """Return the documented example workspace config for the API/UI."""
     return sample_config()
+
+
+def record_review(
+    draft_id: str,
+    status: str,
+    reviewer: str = "",
+    comment: str = "",
+    store: Optional[ReviewStore] = None,
+) -> ReviewRecord:
+    """Record a review transition for ``draft_id`` and return the new state.
+
+    ``status`` must be one of ``pending`` / ``approved`` / ``rejected`` (case
+    insensitive) and ``draft_id`` must be known to ``store``. Raises
+    :class:`ValueError` for an unknown status or empty draft id and
+    :class:`LookupError` for an unknown draft id. A failed call never appends
+    to the audit log.
+    """
+    if not isinstance(draft_id, str) or not draft_id.strip():
+        raise ValueError("draft_id is required")
+    normalized = (status or "").strip().lower()
+    if normalized not in REVIEW_STATUSES:
+        raise ValueError("unknown review status: {!r}".format(status))
+    store = store if store is not None else ReviewStore()
+    if not store.has_draft(draft_id):
+        raise LookupError("unknown draft id: {}".format(draft_id))
+    return store.record(
+        draft_id,
+        normalized,
+        str(reviewer or ""),
+        str(comment or ""),
+    )
+
+
+def get_review(
+    draft_id: str, store: Optional[ReviewStore] = None
+) -> Dict[str, Any]:
+    """Return the current review state of ``draft_id`` plus its audit trail.
+
+    Raises :class:`LookupError` for a draft id the store does not know about.
+    A known draft that has never been reviewed reports ``pending`` with an
+    empty audit list.
+    """
+    store = store if store is not None else ReviewStore()
+    if not store.has_draft(draft_id):
+        raise LookupError("unknown draft id: {}".format(draft_id))
+    record = store.get(draft_id)
+    if record is None:
+        record = ReviewRecord(id=draft_id, status=REVIEW_PENDING)
+    payload = record.to_dict()
+    payload["draft_id"] = payload.pop("id")
+    payload["audit"] = store.audit(draft_id)
+    return payload

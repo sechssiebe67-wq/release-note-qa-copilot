@@ -84,6 +84,9 @@
     .pill.high { color: var(--high); border-color: var(--high); }
     .pill.medium { color: var(--medium); border-color: var(--medium); }
     .pill.pass { color: var(--pass); border-color: var(--pass); }
+    .pill.pending { color: var(--medium); border-color: var(--medium); }
+    .pill.approved { color: var(--pass); border-color: var(--pass); }
+    .pill.rejected { color: var(--high); border-color: var(--high); }
     ul.checklist { list-style: none; padding: 0; margin: 0 0 1rem; }
     ul.checklist li { padding: .35rem 0; border-bottom: 1px dashed var(--border); font-size: .9rem; }
     .flag { font-size: .82rem; padding: .35rem .5rem; border-radius: 6px; margin: .2rem 0; background: var(--panel-2); }
@@ -231,6 +234,32 @@
       <div id="diff" class="muted">Run a diff to compare the current draft with the previous release.</div>
     </section>
 
+    <section style="grid-column: 1 / -1;" id="reviewHint" hidden>
+      <label>Review</label>
+      <p class="muted">Approve, reject or reset a draft and keep an audit trail. Set <code>DATA_DIR</code> when starting the server so drafts get an id and reviews are persisted durably.</p>
+    </section>
+
+    <section style="grid-column: 1 / -1;" id="reviewSection" hidden>
+      <label>Review</label>
+      <div class="summary" id="reviewBadge"></div>
+      <div class="row" style="margin-top:.4rem">
+        <div>
+          <label for="reviewer">Reviewer</label>
+          <input id="reviewer" placeholder="Your name" />
+        </div>
+        <div>
+          <label for="reviewComment">Comment</label>
+          <input id="reviewComment" placeholder="Optional note for the audit log" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:.5rem">
+        <button id="approveReview" type="button">Approve</button>
+        <button id="rejectReview" class="secondary" type="button">Reject</button>
+        <button id="resetReview" class="secondary" type="button">Reset to pending</button>
+      </div>
+      <div id="reviewAudit" class="muted" style="margin-top:.5rem"></div>
+    </section>
+
     <section style="grid-column: 1 / -1;">
       <div class="row">
         <div><label>Markdown draft</label></div>
@@ -258,6 +287,7 @@
     const esc = (value) => String(value).replace(/[&<>"']/g, (c) => ESCAPE_MAP[c]);
     let lastMarkdown = "";
     let lastResult = null;
+    let lastDraftId = null;
 
     async function api(path, options) {
       const res = await fetch(path, options);
@@ -410,6 +440,16 @@
       lastResult = result;
       $("exports").hidden = false;
       $("downloadDiffCsv").hidden = !result.diff;
+
+      lastDraftId = result.draft_id || null;
+      if (lastDraftId) {
+        $("reviewSection").hidden = false;
+        $("reviewHint").hidden = true;
+        refreshReview(lastDraftId);
+      } else {
+        $("reviewSection").hidden = true;
+        $("reviewHint").hidden = false;
+      }
     }
 
     async function generate() {
@@ -543,6 +583,61 @@
       URL.revokeObjectURL(url);
     }
 
+    function renderReview(review) {
+      const status = review.status || "pending";
+      let badge = '<span class="pill ' + esc(status) + '">' + esc(status) + '</span>';
+      if (review.reviewer) badge += '<span class="pill">' + esc(review.reviewer) + '</span>';
+      if (review.updated_at) {
+        badge += '<span class="muted">' + esc(new Date(review.updated_at).toLocaleString()) + '</span>';
+      }
+      $("reviewBadge").innerHTML = badge;
+      const audit = review.audit || [];
+      if (!audit.length) {
+        $("reviewAudit").textContent = "No review recorded yet.";
+        return;
+      }
+      $("reviewAudit").innerHTML = audit.map(entry => {
+        const status = esc(entry.status);
+        const reviewer = esc(entry.reviewer || "anonymous");
+        const comment = entry.comment ? " — " + esc(entry.comment) : "";
+        const when = esc(new Date(entry.updated_at).toLocaleString());
+        return '<div class="flag low"><strong>' + status + '</strong> — ' +
+          reviewer + comment +
+          ' <span class="muted">' + when + '</span></div>';
+      }).join("");
+    }
+
+    async function refreshReview(draftId) {
+      try {
+        const review = await api("/api/review/" + encodeURIComponent(draftId));
+        renderReview(review);
+      } catch (err) {
+        $("reviewBadge").innerHTML = "";
+        $("reviewAudit").textContent = "Review unavailable: " + err.message;
+      }
+    }
+
+    async function submitReview(status) {
+      if (!lastDraftId) { $("status").textContent = "Generate a draft with a draft_id first."; return; }
+      $("status").textContent = "Recording review…";
+      try {
+        const review = await api("/api/review", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            draft_id: lastDraftId,
+            status: status,
+            reviewer: $("reviewer").value,
+            comment: $("reviewComment").value
+          })
+        });
+        renderReview(review);
+        $("status").textContent = "Review status: " + review.status + ".";
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      }
+    }
+
     async function loadHistory() {
       try {
         const data = await api("/api/history?limit=10");
@@ -567,6 +662,9 @@
     $("downloadChecklistCsv").addEventListener("click", downloadChecklistCsv);
     $("downloadDiffCsv").addEventListener("click", downloadDiffCsv);
     $("downloadJson").addEventListener("click", downloadJson);
+    $("approveReview").addEventListener("click", () => submitReview("approved"));
+    $("rejectReview").addEventListener("click", () => submitReview("rejected"));
+    $("resetReview").addEventListener("click", () => submitReview("pending"));
     loadSample("csv");
     loadHistory();
   </script>

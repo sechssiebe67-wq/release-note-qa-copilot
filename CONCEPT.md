@@ -40,8 +40,9 @@ The MVP is a dependency-free Python web application:
 | Diff | Compare two drafts: added / changed / removed / unchanged entries, repeated claims and regressions |
 | Export | Markdown download plus CSV/JSON downloads of QA flags, checklist, diff and the full draft; `GET /api/export/*` for automation |
 | History | Optional file-backed store of generated drafts (`DATA_DIR`) |
+| Review workflow | Mark a draft `pending` / `approved` / `rejected` with reviewer + comment; every transition appended to an append-only audit log; in-memory fallback when `DATA_DIR` is unset |
 | Workspace rules | Per-workspace JSON config: extra/allowed vague terms, banned phrases, required sections, severity overrides |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/history`, `POST /api/generate`, `POST /api/diff` |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/history`, `GET /api/review/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. After a
@@ -62,10 +63,10 @@ releasenote/
   diff.py       compare two drafts: classification, repeated claims, regressions
   generator.py  Markdown rendering with inline QA annotations
   exporters.py  CSV / JSON rendering of qa, checklist, diff and full payload
-  service.py    parse -> group -> qa -> render pipeline (+ build_diff)
-  storage.py    optional append-only draft history
+  service.py    parse -> group -> qa -> render pipeline (+ build_diff, reviews)
+  storage.py    optional append-only draft history + review/audit store
   server.py     stdlib HTTP server + JSON API
-  static/       single-page browser UI
+  static/       single-page browser UI (draft, diff, review controls)
 tests/          offline unit tests (no network)
 Dockerfile      non-root, read-only-friendly image
 deploy/helm/    one chart exposing image digest, ingress, probes, PVC
@@ -208,6 +209,60 @@ holds (`Blob` + `URL.createObjectURL`) and shows the download buttons only
 after a successful generate or diff. The feature ships in **v0.4.0** (Python
 package and Helm chart).
 
+## Review workflow
+
+The QA verdict tells a reviewer *what* is risky, but not *who* signed off on
+the draft or when. The review workflow adds a lightweight, offline sign-off
+layer on top of the existing draft pipeline and file-backed history:
+
+- A draft has exactly one **review status**: `pending`, `approved` or
+  `rejected`. Drafts start as `pending`.
+- Recording a transition stores an optional `reviewer` name and `comment` and
+  appends one entry to an **append-only audit log**. The audit log is the
+  system of record: it keeps the timestamp, the draft id, the previous status
+  and the new status of every transition.
+- The state and the audit trail are exposed through the API and rendered in
+  the UI as a status badge plus *Approve* / *Reject* / *Reset to pending*
+  controls.
+
+**Storage.** With `DATA_DIR` set, review state is written to
+`<DATA_DIR>/reviews.jsonl` (the latest line per draft wins) and every
+transition is additionally appended to `<DATA_DIR>/audit.jsonl`. Each entry
+uses `datetime.now(timezone.utc).isoformat()` and a monotonically increasing
+`seq`, so ordering is stable even when two transitions share a timestamp.
+When `DATA_DIR` is unset the store falls back to in-memory dictionaries: the
+API keeps working, but reviews are lost on restart and draft existence cannot
+be validated (any draft id is accepted). This is why the durable audit trail
+requires history to be enabled.
+
+**API.**
+
+| Endpoint | Body / query | Response |
+| --- | --- | --- |
+| `POST /api/review` | `{"draft_id": "...", "status": "approved"\|"rejected"\|"pending", "reviewer": "...", "comment": "..."}` | The updated record: `draft_id`, `status`, `reviewer`, `comment`, `updated_at` and the `audit` list. |
+| `GET /api/review/<draft_id>` | — | `{"draft_id": ..., "status": ..., "reviewer": ..., "comment": ..., "updated_at": ..., "audit": [ ... ]}`. |
+
+Each audit entry has the shape:
+
+```json
+{
+  "seq": 1,
+  "draft_id": "…",
+  "status": "approved",
+  "reviewer": "Ada",
+  "comment": "Ship it",
+  "updated_at": "2026-01-01T12:00:00+00:00",
+  "previous_status": "pending"
+}
+```
+
+An unknown `status` returns HTTP 400 and an unknown `draft_id` returns HTTP
+404; neither call appends to the audit log. A known draft that has never been
+reviewed reports `pending` with an empty audit list. The endpoints reuse the
+same 2 MiB body cap and JSON-object validation as the rest of the API and add
+no new dependencies. The feature ships in **v0.5.0** (Python package and Helm
+chart).
+
 ## Deployment contract
 
 - Docker image builds for `linux/amd64` and `linux/arm64`, serves HTTP on port
@@ -226,7 +281,9 @@ package and Helm chart).
 
 - Confluence / GitHub Releases / e-mail publish integrations behind a review
   gate.
-- Multi-user roles (author / QA reviewer / approver) and audit log.
+- Multi-user roles (author / QA reviewer / approver) and audit log — the
+  status + audit-log half landed in **v0.5.0**; per-user authentication and
+  role enforcement are still open.
 - Optional LLM assistance for benefit wording that still cites a source.
 - Persist workspace rules server-side and version them alongside drafts.
 
@@ -236,6 +293,8 @@ Diffing two releases to highlight regressions and repeated claims (was the
 second item) landed in **v0.3.0** — see [Release diff](#release-diff).
 Machine-readable CSV / JSON export of the QA result and diff landed in
 **v0.4.0** — see [Export](#export).
+The review workflow and audit trail landed in **v0.5.0** — see
+[Review workflow](#review-workflow).
 
 ## Success signals
 
