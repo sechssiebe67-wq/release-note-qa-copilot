@@ -15,8 +15,21 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .config import WorkspaceConfig
-from .exporters import checklist_csv, diff_csv, draft_json, qa_flags_csv
+from .exporters import (
+    checklist_csv,
+    diff_csv,
+    draft_json,
+    qa_flags_csv,
+    rules_csv,
+    rules_json,
+)
 from .importer import ParseError
+from .profiles import (
+    UnknownProfileError,
+    list_profiles,
+    normalize_profile_name,
+    resolve_config,
+)
 from .service import (
     build_diff,
     build_draft,
@@ -36,6 +49,8 @@ _EXPORTS = {
     "/api/export/qa.csv": ("text/csv", "qa-flags.csv"),
     "/api/export/checklist.csv": ("text/csv", "qa-checklist.csv"),
     "/api/export/diff.csv": ("text/csv", "release-diff.csv"),
+    "/api/export/rules.csv": ("text/csv", "qa-rules.csv"),
+    "/api/export/rules.json": ("application/json; charset=utf-8", "qa-rules.json"),
     "/api/export/draft.json": ("application/json; charset=utf-8", "release-draft.json"),
 }
 _FORMATS = ("auto", "csv", "json")
@@ -139,6 +154,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config/sample":
             self._send_json(200, sample_workspace_config())
             return
+        if path == "/api/profiles":
+            self._send_json(200, {"profiles": list_profiles()})
+            return
         if path == "/api/history":
             store = getattr(self.server, "store", None)
             query = parse_qs(parsed.query)
@@ -186,6 +204,16 @@ class Handler(BaseHTTPRequestHandler):
         if fmt not in _FORMATS:
             self._send_json(400, {"error": "unsupported format: {!r}".format(fmt)})
             return
+        profile_name = _first(query, "profile")
+        try:
+            profile_name = normalize_profile_name(profile_name)
+            workspace = resolve_config({"profile": profile_name})
+        except UnknownProfileError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": "invalid config: {}".format(exc)})
+            return
         try:
             if path == "/api/export/diff.csv":
                 previous = _first(query, "previous")
@@ -196,18 +224,26 @@ class Handler(BaseHTTPRequestHandler):
                 if not current or not current.strip():
                     self._send_json(400, {"error": "query 'current' is required"})
                     return
-                result = build_diff(previous, current, fmt, title)
+                result = build_diff(
+                    previous, current, fmt, title, workspace, profile_name
+                )
                 body = diff_csv(result)
             else:
                 content = _first(query, "content")
                 if not content or not content.strip():
                     self._send_json(400, {"error": "query 'content' is required"})
                     return
-                result = build_draft(content, fmt, title)
+                result = build_draft(
+                    content, fmt, title, workspace, profile_name
+                )
                 if path == "/api/export/qa.csv":
                     body = qa_flags_csv(result)
                 elif path == "/api/export/checklist.csv":
                     body = checklist_csv(result)
+                elif path == "/api/export/rules.csv":
+                    body = rules_csv(result)
+                elif path == "/api/export/rules.json":
+                    body = rules_json(result)
                 else:
                     body = draft_json(result)
         except ParseError as exc:
@@ -260,19 +296,26 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return payload
 
-    def _parse_config(
+    def _resolve_request(
         self, payload: Dict[str, Any]
-    ) -> Optional[WorkspaceConfig]:
-        """Validate the optional ``config`` field, replying on error."""
-        config_payload = payload.get("config")
-        if config_payload is not None and not isinstance(config_payload, dict):
-            self._send_json(400, {"error": "'config' must be a JSON object"})
-            return None
+    ) -> Optional[Tuple[WorkspaceConfig, Optional[str]]]:
+        """Resolve the optional ``profile``/``config`` fields.
+
+        Returns ``(workspace, profile_name)`` where ``profile_name`` is the
+        resolved profile or ``None``. On error a 400 response is sent and
+        ``None`` is returned; an unknown profile names the profile in the
+        message.
+        """
         try:
-            return WorkspaceConfig.from_dict(config_payload)
+            profile_name = normalize_profile_name(payload.get("profile"))
+            workspace = resolve_config(payload)
+        except UnknownProfileError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return None
         except ValueError as exc:
             self._send_json(400, {"error": "invalid config: {}".format(exc)})
             return None
+        return workspace, profile_name
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -286,13 +329,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/review":
             self._post_review(payload)
             return
-        workspace = self._parse_config(payload)
-        if workspace is None:
+        resolved = self._resolve_request(payload)
+        if resolved is None:
             return
+        workspace, profile_name = resolved
         if path == "/api/generate":
-            self._post_generate(payload, workspace)
+            self._post_generate(payload, workspace, profile_name)
         else:
-            self._post_diff(payload, workspace)
+            self._post_diff(payload, workspace, profile_name)
 
     def _post_review(self, payload: Dict[str, Any]) -> None:
         draft_id = payload.get("draft_id")
@@ -330,7 +374,10 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, result)
 
     def _post_generate(
-        self, payload: Dict[str, Any], workspace: WorkspaceConfig
+        self,
+        payload: Dict[str, Any],
+        workspace: WorkspaceConfig,
+        profile: Optional[str] = None,
     ) -> None:
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
@@ -342,7 +389,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "'format' and 'title' must be strings"})
             return
         try:
-            result = build_draft(content, fmt, title, workspace)
+            result = build_draft(content, fmt, title, workspace, profile)
         except ParseError as exc:
             self._send_json(422, {"error": str(exc)})
             return
@@ -353,7 +400,10 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, result)
 
     def _post_diff(
-        self, payload: Dict[str, Any], workspace: WorkspaceConfig
+        self,
+        payload: Dict[str, Any],
+        workspace: WorkspaceConfig,
+        profile: Optional[str] = None,
     ) -> None:
         previous = payload.get("previous")
         if not isinstance(previous, str) or not previous.strip():
@@ -369,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "'format' and 'title' must be strings"})
             return
         try:
-            result = build_diff(previous, current, fmt, title, workspace)
+            result = build_diff(previous, current, fmt, title, workspace, profile)
         except ParseError as exc:
             self._send_json(422, {"error": str(exc)})
             return

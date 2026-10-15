@@ -16,6 +16,7 @@ from .models import (
     QAResult,
     ReviewRecord,
 )
+from .profiles import rule_summary
 from .qa import analyze_entries, checklist
 from .storage import ReviewStore
 
@@ -52,6 +53,7 @@ def _assemble(
     qa: QAResult,
     workspace: WorkspaceConfig,
     title: str,
+    profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the standard draft payload shared by generate and diff."""
     groups = group_entries(entries)
@@ -71,6 +73,8 @@ def _assemble(
         "qa": qa.to_dict(),
         "checklist": checklist(entries, qa),
         "config": workspace.to_dict(),
+        "profile": profile,
+        "rules": rule_summary(entries, qa, workspace),
         "markdown": render_markdown(title, entries, qa),
     }
 
@@ -80,12 +84,14 @@ def build_draft(
     fmt: str = "auto",
     title: str = "Release Notes",
     config: ConfigInput = None,
+    profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Parse ``content`` and return draft, groups and QA data.
 
     ``config`` is an optional workspace config mapping (or a
     :class:`~releasenote.config.WorkspaceConfig`). It is validated and its
-    effective form is echoed back under the ``config`` key.
+    effective form is echoed back under the ``config`` key. ``profile`` is the
+    optional resolved profile name, echoed back under ``profile``.
 
     Raises :class:`releasenote.importer.ParseError` for invalid input and
     :class:`ValueError` for an invalid config.
@@ -93,7 +99,7 @@ def build_draft(
     workspace = _coerce_config(config)
     entries = parse_entries(content, fmt)
     qa = analyze_entries(entries, workspace)
-    return _assemble(entries, qa, workspace, title)
+    return _assemble(entries, qa, workspace, title, profile)
 
 
 def build_diff(
@@ -102,6 +108,7 @@ def build_diff(
     fmt: str = "auto",
     title: str = "Release Notes",
     config: ConfigInput = None,
+    profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compare a previous and a current draft and annotate the current one.
 
@@ -119,7 +126,7 @@ def build_diff(
     diff, diff_flags = compute_diff(previous, current, workspace)
     qa = analyze_entries(current, workspace)
     qa.flags.extend(diff_flags)
-    payload = _assemble(current, qa, workspace, title)
+    payload = _assemble(current, qa, workspace, title, profile)
     payload["diff"] = diff
     return payload
 

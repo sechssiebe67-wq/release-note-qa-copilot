@@ -12,6 +12,8 @@ unsupported claims are flagged before publishing.
 - Get a short QA checklist and a publishability verdict.
 - Tailor the QA rules per workspace (extra/allowed terms, banned phrases,
   required sections, severity overrides).
+- Attach a named, reusable **QA rule profile** and see which rules were
+  effective and which fired.
 - Diff two releases to highlight regressions and repeated claims.
 - Export Markdown for Confluence, GitHub Releases or e-mail, and the QA flags,
   checklist and diff as CSV / JSON for spreadsheets and tooling.
@@ -43,9 +45,12 @@ Configuration:
 | GET | `/api/version` | Product name and version |
 | GET | `/api/sample?format=csv\|json` | Example import payload |
 | GET | `/api/config/sample` | Example workspace-rules config |
+| GET | `/api/profiles` | Built-in QA rule profiles (`name`, `description`, `config`) |
 | GET | `/api/export/qa.csv` | QA flags as CSV (`entry_id,code,severity,message`) |
 | GET | `/api/export/checklist.csv` | QA checklist as CSV (`label,status,detail`) |
 | GET | `/api/export/diff.csv` | Release diff as CSV (`category,id,title,type,reason`) |
+| GET | `/api/export/rules.csv` | Effective rule summary as CSV (`code,severity,count`) |
+| GET | `/api/export/rules.json` | Effective rule summary as JSON |
 | GET | `/api/export/draft.json` | Full draft payload as JSON |
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
@@ -57,12 +62,19 @@ Configuration:
 `POST /api/generate` body:
 
 ```json
-{ "format": "auto", "title": "Release 2.0", "content": "<csv or json text>" }
+{
+  "format": "auto",
+  "title": "Release 2.0",
+  "content": "<csv or json text>",
+  "profile": "strict",
+  "config": {}
+}
 ```
 
-Response contains `markdown`, `qa` (flags + counts + `publishable`),
-`checklist`, the grouped `entries`, the effective `config`, and a `draft_id`
-when history is enabled.
+`profile` and `config` are both optional. Response contains `markdown`, `qa`
+(flags + counts + `publishable`), `checklist`, the grouped `entries`, the
+effective `config`, the resolved `profile` (or `null`), a `rules` summary, and
+a `draft_id` when history is enabled.
 
 ## Workspace rules
 
@@ -98,6 +110,49 @@ the built-in rules and severities are unchanged.
 
 The response echoes the effective config under `config` so reviewers can see
 which rules produced each flag. Workspace rules were added in **v0.2.0**.
+
+## QA rule profiles
+
+A **profile** is a named, reusable `WorkspaceConfig` plus a description. Pass
+an optional `profile` string to `POST /api/generate` or `POST /api/diff` (in
+addition to the existing inline `config`); the profile is applied first and the
+inline config is layered on top (list fields are unioned, `severity_overrides`
+merge with the inline value winning). `GET /api/profiles` lists the built-ins:
+
+| Profile | Purpose |
+| --- | --- |
+| `strict` | Re-ranks `vague_language` to `high` and requires a `breaking` section. |
+| `marketing-safe` | Bans common hype phrases (`world's best`, `best-in-class`, `game-changing`, `guaranteed`, `revolutionary`, `cutting-edge`). |
+| `internal` | Allows internal shorthand terms (`misc`, `stuff`, `things`, `various`, `several`). |
+
+An unknown profile returns HTTP 400 naming the profile and stores no draft. The
+response echoes the resolved profile under `profile` and adds a `rules` object
+with the effective vague terms, banned phrases, required sections, severity
+overrides and the number of flags that fired per code. Download it with:
+
+| Endpoint | Shape |
+| --- | --- |
+| `GET /api/export/rules.csv` | `code,severity,count` (header only when nothing fired). |
+| `GET /api/export/rules.json` | The full `rules` summary. |
+
+Both accept the same `format`, `title` and `content` query parameters as the
+other exports plus an optional `profile`, and answer with `text/csv` /
+`application/json` and a `Content-Disposition: attachment` header.
+
+```sh
+curl -X POST 'http://127.0.0.1:8080/api/generate' \
+  -H 'Content-Type: application/json' \
+  -d '{"format": "csv", "profile": "strict", "content": "id,type,title,description,benefit,source\nA,fix,Better sync,The sync is improved,A much better experience,A\n"}'
+```
+
+```sh
+curl -G 'http://127.0.0.1:8080/api/export/rules.csv' \
+  --data-urlencode 'format=csv' \
+  --data-urlencode 'profile=strict' \
+  --data-urlencode $'content=id,type,title,description,benefit,source\nA,fix,Better sync,The sync is improved,A much better experience,A\n'
+```
+
+The QA rule profiles and the effective-rule summary were added in **v0.6.0**.
 
 ## Comparing releases
 
@@ -157,16 +212,18 @@ JSON from the UI (the *Download QA CSV*, *Download checklist CSV*, *Download
 JSON* and *Download diff CSV* buttons appear after a successful generate/diff)
 or fetched directly from the API. The export endpoints accept the same
 `format`, `title` and `content` query parameters as `POST /api/generate`, plus
-`previous` and `current` for `diff.csv`. They answer with `text/csv` or
-`application/json` and a `Content-Disposition: attachment; filename=...`
-header; missing or invalid parameters return HTTP 400 and unparseable content
-returns HTTP 422.
+`previous` and `current` for `diff.csv` and an optional `profile`. They answer
+with `text/csv` or `application/json` and a
+`Content-Disposition: attachment; filename=...` header; missing or invalid
+parameters return HTTP 400 and unparseable content returns HTTP 422.
 
 | Endpoint | CSV columns / JSON shape |
 | --- | --- |
 | `GET /api/export/qa.csv` | `entry_id,code,severity,message` — one row per flag. |
 | `GET /api/export/checklist.csv` | `label,status,detail` — one row per checklist item. |
 | `GET /api/export/diff.csv` | `category,id,title,type,reason` — one row per item, `category` ∈ `added`, `changed`, `removed`, `unchanged`, `repeated_claims`, `regressions`. |
+| `GET /api/export/rules.csv` | `code,severity,count` — one row per firing flag code (header only when nothing fired). |
+| `GET /api/export/rules.json` | The effective `rules` summary as JSON. |
 | `GET /api/export/draft.json` | The full payload as JSON (stable key order, UTF-8, no `NaN`). |
 
 CSV uses `\n` line endings and quotes any field containing a comma, quote or

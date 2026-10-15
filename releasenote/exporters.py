@@ -21,6 +21,7 @@ from typing import Any, Iterable, List, Sequence
 QA_FLAG_HEADER = ("entry_id", "code", "severity", "message")
 CHECKLIST_HEADER = ("label", "status", "detail")
 DIFF_HEADER = ("category", "id", "title", "type", "reason")
+RULES_HEADER = ("code", "severity", "count")
 
 # Canonical order of the diff categories, matching the server payload.
 DIFF_CATEGORIES = (
@@ -112,6 +113,34 @@ def diff_csv(payload: Mapping[str, Any]) -> str:
     return _render_csv(DIFF_HEADER, rows)
 
 
+def rules_csv(payload: Mapping[str, Any]) -> str:
+    """Return one CSV row per firing flag code: ``code,severity,count``.
+
+    The counts come from the ``rules`` summary produced by
+    :func:`releasenote.profiles.rule_summary`. When no flag fired only the
+    header row is returned, so the shape is always stable.
+    """
+    rules = _as_mapping(_as_mapping(payload).get("rules"))
+    counts = _as_mapping(rules.get("flag_counts"))
+    severities = _as_mapping(rules.get("flag_severities"))
+    rows = [
+        (code, severities.get(code, ""), counts.get(code, 0))
+        for code in sorted(counts)
+    ]
+    return _render_csv(RULES_HEADER, rows)
+
+
+def rules_json(payload: Mapping[str, Any]) -> str:
+    """Serialise the ``rules`` summary as stable, UTF-8 JSON without NaN."""
+    rules = _as_mapping(_as_mapping(payload).get("rules"))
+    return json.dumps(
+        rules,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
 def draft_json(payload: Mapping[str, Any]) -> str:
     """Serialise the full payload as stable, UTF-8 JSON without NaN values."""
     return json.dumps(
@@ -126,9 +155,12 @@ __all__ = [
     "QA_FLAG_HEADER",
     "CHECKLIST_HEADER",
     "DIFF_HEADER",
+    "RULES_HEADER",
     "DIFF_CATEGORIES",
     "qa_flags_csv",
     "checklist_csv",
     "diff_csv",
+    "rules_csv",
+    "rules_json",
     "draft_json",
 ]

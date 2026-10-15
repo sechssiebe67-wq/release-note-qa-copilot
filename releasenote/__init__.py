@@ -18,12 +18,28 @@ from .models import (
     REVIEW_STATUSES,
 )
 from .config import WorkspaceConfig
+from .profiles import (
+    BUILTIN_PROFILES,
+    RuleProfile,
+    UnknownProfileError,
+    get_profile,
+    list_profiles,
+    resolve_config,
+    rule_summary,
+)
 from .importer import parse_entries, parse_csv, parse_json, ParseError
 from .grouping import group_entries
-from .qa import analyze_entries, analyze_entry
+from .qa import analyze_entries, analyze_entry, effective_vague_terms
 from .generator import render_markdown, render_qa_checklist
 from .diff import diff_drafts, compute_diff
-from .exporters import checklist_csv, diff_csv, draft_json, qa_flags_csv
+from .exporters import (
+    checklist_csv,
+    diff_csv,
+    draft_json,
+    qa_flags_csv,
+    rules_csv,
+    rules_json,
+)
 from .storage import DraftStore, ReviewStore
 from .service import record_review, get_review
 
@@ -39,6 +55,13 @@ __all__ = [
     "REVIEW_REJECTED",
     "REVIEW_STATUSES",
     "WorkspaceConfig",
+    "RuleProfile",
+    "UnknownProfileError",
+    "BUILTIN_PROFILES",
+    "get_profile",
+    "list_profiles",
+    "resolve_config",
+    "rule_summary",
     "parse_entries",
     "parse_csv",
     "parse_json",
@@ -46,6 +69,7 @@ __all__ = [
     "group_entries",
     "analyze_entries",
     "analyze_entry",
+    "effective_vague_terms",
     "render_markdown",
     "render_qa_checklist",
     "diff_drafts",
@@ -53,6 +77,8 @@ __all__ = [
     "qa_flags_csv",
     "checklist_csv",
     "diff_csv",
+    "rules_csv",
+    "rules_json",
     "draft_json",
     "DraftStore",
     "ReviewStore",
@@ -60,4 +86,4 @@ __all__ = [
     "get_review",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
