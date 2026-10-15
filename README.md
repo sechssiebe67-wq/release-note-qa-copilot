@@ -38,6 +38,11 @@ unsupported claims are flagged before publishing.
 - Track how a draft evolves with **draft versioning**: generating again with the
   same `draft_key` appends an immutable version, and you can list versions, diff
   two of them and roll back to a previous one.
+- Lint the writing itself with the offline **language lint**: readability
+  (Flesch reading ease, sentence length, syllables, long-sentence ratio), style
+  findings (passive voice, first-person slips, ALL-CAPS, emoji, jargon, mixed
+  tense, duplicate headings) and a bounded penalty folded into the release
+  readiness score.
 
 See [CONCEPT.md](CONCEPT.md) for the product goal, users and roadmap.
 
@@ -71,6 +76,9 @@ Configuration:
 | GET | `/api/trend/sample` | Example 3-release trend payload |
 | GET | `/api/compare/sample` | Example 2-draft comparison payload |
 | GET | `/api/compare-profiles/sample` | Example one-changelog profile-comparison payload |
+| GET | `/api/language/sample` | Example input payload that exercises the language lint |
+| GET | `/api/export/language.csv` | Language findings as CSV (`code,severity,entry_id,message`) |
+| GET | `/api/export/language.json` | Full `language` object as JSON |
 | GET | `/api/export/qa.csv` | QA flags as CSV (`entry_id,code,severity,message`) |
 | GET | `/api/export/checklist.csv` | QA checklist as CSV (`label,status,detail`) |
 | GET | `/api/export/diff.csv` | Release diff as CSV (`category,id,title,type,reason`) |
@@ -131,9 +139,10 @@ Configuration:
 contains `markdown`, `qa` (flags + counts + `publishable`), `checklist`, the
 grouped `entries`, the effective `config`, the resolved `profile` (or `null`),
 the resolved `template`, a `rules` summary (which includes the resolved template
-and the effective gate), the `score` (with its `band` and `penalties`), the
-`gate` decision (`status` + `reasons`), and a `draft_id` when history is
-enabled. When `draft_key` is supplied and history is enabled the payload also
+and the effective gate), a `language` report (readability, style, findings and
+summary; its findings are also merged into `qa.flags`), the `score` (with its
+`band` and `penalties`), the `gate` decision (`status` + `reasons`), and a
+`draft_id` when history is enabled. When `draft_key` is supplied and history is enabled the payload also
 echoes `draft_key` and the assigned `version`.
 
 ## Workspace rules
@@ -355,6 +364,8 @@ parameters return HTTP 400 and unparseable content returns HTTP 422.
 | `GET /api/export/rules.json` | The effective `rules` summary as JSON. |
 | `GET /api/export/template.csv` | `section,title,required,entry_count` — one row per resolved template section. |
 | `GET /api/export/template.json` | The resolved template with a per-section `entry_count` as JSON. |
+| `GET /api/export/language.csv` | `code,severity,entry_id,message` — one row per language finding. |
+| `GET /api/export/language.json` | The full `language` object as JSON (stable key order, UTF-8, no `NaN`). |
 | `GET /api/export/draft.json` | The full payload as JSON (stable key order, UTF-8, no `NaN`). |
 
 CSV uses `\n` line endings and quotes any field containing a comma, quote or
@@ -967,6 +978,80 @@ status after a successful generate or diff, and adds *Download score CSV* /
 *Download score JSON* buttons built in the browser from the payload already on
 screen (no extra server round-trip). The release readiness score and gate policy
 were added in **v0.12.0**; no third-party dependency is required.
+
+## Language lint
+
+Traceability and hype checks flag *what* is risky; the **language lint** checks
+whether the writing itself is readable and consistent. It is deterministic and
+offline (fixed sentence splitter, syllable counter, pattern/term/tense lists, no
+external packages) and every draft gains a top-level `language` object:
+
+```json
+{
+  "readability": {
+    "flesch_reading_ease": 83.32,
+    "avg_sentence_length": 5.0,
+    "avg_syllables_per_word": 1.4,
+    "long_sentence_ratio": 0.0
+  },
+  "style": {
+    "passive_voice_hits": 1,
+    "first_person_hits": 1,
+    "all_caps_hits": 0,
+    "emoji_hits": 0,
+    "jargon_hits": 0,
+    "tense_mix": 0
+  },
+  "findings": [
+    {"code": "passive_voice", "severity": "low", "entry_id": "A",
+     "message": "Passive voice: are excited."},
+    {"code": "first_person", "severity": "low", "entry_id": "A",
+     "message": "First-person wording: we."}
+  ],
+  "summary": {"grade": "acceptable", "counts": {"high": 0, "medium": 0, "low": 2, "total": 2}}
+}
+```
+
+The readability numbers are computed over entry titles + descriptions +
+benefits. `summary.grade` is `clear` (no findings), `acceptable` (up to three)
+or `dense` (more). The findings reuse the `qa` flag shape, honour
+`severity_overrides` and are **merged into `qa.flags`** alongside the
+traceability and hype flags.
+
+| Flag | Severity | Meaning |
+| --- | --- | --- |
+| `long_sentence` | medium | A sentence of 40 or more words. |
+| `passive_voice` | low | A form of "to be"/"get" followed by a past participle. |
+| `first_person` | low | First-person wording such as "we", "our" or "I". |
+| `all_caps` | low | An ALL-CAPS word of four or more letters (common acronyms ignored). |
+| `emoji_in_release_note` | low | Emoji characters in the draft. |
+| `jargon` | medium | A term from the fixed jargon list (for example "leverage"). |
+| `tense_inconsistency` | low | Benefits mix past and present tense. |
+| `duplicate_heading` | medium | Two entries share the same heading/title. |
+
+The release readiness score folds the language findings into a single **bounded**
+penalty: two points per finding, capped at twenty, reported as one `language`
+penalty row. Adding language findings therefore lowers `score` and can move the
+`band` (and a `min_score` gate) while keeping the deduction explainable.
+
+```sh
+curl -G 'http://127.0.0.1:8080/api/export/language.csv' \
+  --data-urlencode 'format=csv' \
+  --data-urlencode $'content=id,type,title,description,benefit,source\nA,fix,Fix login,We are excited to ship this.,Reliable access,A\n'
+```
+
+```csv
+code,severity,entry_id,message
+passive_voice,low,A,Passive voice: are excited.
+first_person,low,A,First-person wording: we.
+```
+
+`GET /api/language/sample` returns an input payload that exercises every code
+and is valid for `POST /api/generate`. The browser UI renders a *Language* panel
+after a successful generate with the readability numbers, a grade badge, the
+findings table and *Download language CSV* / *Download language JSON* buttons.
+The language lint was added in **v0.15.0**; no third-party dependency is
+required.
 
 ## Input format
 

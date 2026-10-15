@@ -53,6 +53,12 @@ from .templates import (
     template_summary,
 )
 from .generator import render_markdown, render_qa_checklist
+from .language import (
+    LANGUAGE_FLAG_CODES,
+    LANGUAGE_SEVERITIES,
+    compute_language,
+    language_flags,
+)
 from .diff import diff_drafts, compute_diff
 from .trend import compute_trend
 from .compare import compute_comparison
@@ -67,6 +73,8 @@ from .exporters import (
     comparison_matrix_csv,
     diff_csv,
     draft_json,
+    language_csv,
+    language_json,
     profile_comparison_csv,
     profile_comparison_json,
     qa_flags_csv,
@@ -157,6 +165,12 @@ __all__ = [
     "template_summary",
     "render_markdown",
     "render_qa_checklist",
+    "compute_language",
+    "language_flags",
+    "LANGUAGE_FLAG_CODES",
+    "LANGUAGE_SEVERITIES",
+    "language_csv",
+    "language_json",
     "diff_drafts",
     "compute_diff",
     "compute_trend",
@@ -213,4 +227,4 @@ __all__ = [
     "rollback_draft_version",
 ]
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"

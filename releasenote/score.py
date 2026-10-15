@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .config import WorkspaceConfig
+from .language import LANGUAGE_FLAG_CODES
 from .models import (
     SEVERITY_HIGH,
     SEVERITY_LOW,
@@ -49,7 +50,27 @@ SEVERITY_PENALTIES = {
 GATE_PASS = "pass"
 GATE_FAIL = "fail"
 
+# Language lint contributes one bounded, explainable penalty rather than a
+# per-flag deduction (which would double-count it, since the language findings
+# are already merged into the QA flags). Each finding costs
+# :data:`LANGUAGE_PENALTY_PER_FINDING` points, capped at
+# :data:`LANGUAGE_PENALTY_MAX`, and is reported as a single ``language``
+# ``penalties`` row.
+LANGUAGE_PENALTY_CODE = "language"
+LANGUAGE_PENALTY_PER_FINDING = 2
+LANGUAGE_PENALTY_MAX = 20
+
 _FALLBACK_PENALTY = SEVERITY_PENALTIES[SEVERITY_LOW]
+
+_SEVERITY_RANK = {SEVERITY_HIGH: 3, SEVERITY_MEDIUM: 2, SEVERITY_LOW: 1}
+
+
+def _worst_severity(flags: List[Any]) -> str:
+    """Return the highest severity among ``flags`` (or ``medium``)."""
+    if not flags:
+        return SEVERITY_MEDIUM
+    severities = [_severity(flag) for flag in flags]
+    return max(severities, key=lambda s: _SEVERITY_RANK.get(s, 0))
 
 
 def band_for(score: int) -> str:
@@ -136,6 +157,7 @@ def compute_score(
     qa: Any,
     entries: Any,
     config: Optional[WorkspaceConfig] = None,
+    language: Any = None,
 ) -> Dict[str, Any]:
     """Return the deterministic ``{score, band, penalties, gate}`` for a draft.
 
@@ -145,17 +167,32 @@ def compute_score(
     a fifty-entry one). The deduction is clamped to ``0..100`` and rounded to an
     integer.
 
+    Language findings are folded in as **one bounded penalty** instead of the
+    per-flag deduction: each language finding costs
+    :data:`LANGUAGE_PENALTY_PER_FINDING` points, capped at
+    :data:`LANGUAGE_PENALTY_MAX`, and is reported as a single ``language`` row.
+    ``language`` may be the mapping returned by
+    :func:`releasenote.language.compute_language`; when omitted, the language
+    findings already present in ``qa`` are counted instead.
+
     ``penalties`` is one ``{code, severity, count, points}`` row per firing flag
-    code, sorted by ``points`` descending and then ``code``. ``gate`` is the
-    ``{status, reasons}`` decision for the effective gate policy in ``config``
-    (see :func:`evaluate_gate`).
+    code (plus the bounded ``language`` row), sorted by ``points`` descending
+    and then ``code``. ``gate`` is the ``{status, reasons}`` decision for the
+    effective gate policy in ``config`` (see :func:`evaluate_gate`).
     """
     config = config or WorkspaceConfig.default()
     flags = _flags(qa)
     divisor = max(_entry_count(entries), 1)
 
+    language_flags = [
+        flag for flag in flags if _code(flag) in LANGUAGE_FLAG_CODES
+    ]
+    regular_flags = [
+        flag for flag in flags if _code(flag) not in LANGUAGE_FLAG_CODES
+    ]
+
     buckets: Dict[tuple, int] = {}
-    for flag in flags:
+    for flag in regular_flags:
         key = (_code(flag), _severity(flag))
         buckets[key] = buckets.get(key, 0) + 1
 
@@ -168,6 +205,29 @@ def compute_score(
                 "code": code,
                 "severity": severity,
                 "count": count,
+                "points": points,
+            }
+        )
+
+    language_count = len(language_flags)
+    if isinstance(language, dict):
+        findings = language.get("findings")
+        if isinstance(findings, list):
+            language_count = len(findings)
+
+    if language_count:
+        points = float(
+            min(
+                LANGUAGE_PENALTY_PER_FINDING * language_count,
+                LANGUAGE_PENALTY_MAX,
+            )
+        )
+        severity = _worst_severity(language_flags)
+        penalties.append(
+            {
+                "code": LANGUAGE_PENALTY_CODE,
+                "severity": severity,
+                "count": language_count,
                 "points": points,
             }
         )
@@ -197,6 +257,9 @@ __all__ = [
     "SEVERITY_PENALTIES",
     "GATE_PASS",
     "GATE_FAIL",
+    "LANGUAGE_PENALTY_CODE",
+    "LANGUAGE_PENALTY_PER_FINDING",
+    "LANGUAGE_PENALTY_MAX",
     "band_for",
     "evaluate_gate",
     "compute_score",

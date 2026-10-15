@@ -242,9 +242,9 @@ class WorkspaceConfigQATests(unittest.TestCase):
 class AnalyzeEntriesTests(unittest.TestCase):
     def test_aggregates_and_publishability(self):
         good = ChangeEntry(
-            id="1", type=TYPE_FIX, title="T", description="D", source="1"
+            id="1", type=TYPE_FIX, title="Alpha", description="D", source="1"
         )
-        bad = ChangeEntry(id="2", type=TYPE_FIX, title="T", description="D")
+        bad = ChangeEntry(id="2", type=TYPE_FIX, title="Beta", description="D")
         qa = analyze_entries([good, bad])
         self.assertFalse(qa.publishable)
         self.assertEqual(len(qa.high), 1)
