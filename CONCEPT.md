@@ -40,11 +40,12 @@ The MVP is a dependency-free Python web application:
 | Diff | Compare two drafts: added / changed / removed / unchanged entries, repeated claims and regressions |
 | Export | Markdown download plus CSV/JSON downloads of QA flags, checklist, diff, effective rules and the full draft; `GET /api/export/*` for automation |
 | History | Optional file-backed store of generated drafts (`DATA_DIR`) |
+| Share links | Read-only `GET /s/<draft_id>` HTML page and `GET /api/share/<draft_id>` JSON view of a stored draft, with QA re-run against the current heuristics; requires `DATA_DIR` and is unauthenticated |
 | Review workflow | Mark a draft `pending` / `approved` / `rejected` with reviewer + comment; every transition appended to an append-only audit log; in-memory fallback when `DATA_DIR` is unset |
 | Workspace rules | Per-workspace JSON config: extra/allowed vague terms, banned phrases, required sections, severity overrides |
 | QA rule profiles | Named, reusable rule sets (`strict`, `marketing-safe`, `internal`) that bundle a `WorkspaceConfig` with a description; attach a profile to a draft and get an effective-rule summary |
 | Trend analysis | Analyse 2–20 ordered releases: per-release QA counts, publishability, sourced-entry ratio, vague/banned hits, consecutive deltas (`improving` / `stable` / `regressing`) and an overall verdict; render a table with SVG sparklines and export as CSV/JSON |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/trend/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/history`, `GET /api/review/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend` |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/trend/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
@@ -53,7 +54,9 @@ a profile pre-fills the *Workspace rules* panel. After a successful generate it
 also offers *Download QA CSV*, *Download checklist CSV*, *Download JSON*,
 *Download rules CSV* and *Download rules JSON*; after a diff it adds *Download
 diff CSV*. Those downloads are built in the browser from the payload already on
-screen, so they need no extra server round-trip. A *Trend* section accepts one
+screen, so they need no extra server round-trip. When a draft has a `draft_id`
+the review controls also offer a *Copy share link* button that copies the
+read-only `GET /s/<draft_id>` URL. A *Trend* section accepts one
 release per block, renders the per-release table, inline SVG sparklines for the
 total flag count and sourced ratio and a verdict badge per delta, and exposes
 *Download trend CSV* / *Download trend JSON* after a successful analysis.
@@ -72,10 +75,10 @@ releasenote/
   trend.py      multi-release trend analysis: metrics, deltas, verdicts
   generator.py  Markdown rendering with inline QA annotations
   exporters.py  CSV / JSON rendering of qa, checklist, diff, trend and full payload
-  service.py    parse -> group -> qa -> render pipeline (+ build_diff, reviews)
+  service.py    parse -> group -> qa -> render pipeline (+ build_diff, reviews, shared drafts)
   storage.py    optional append-only draft history + review/audit store
-  server.py     stdlib HTTP server + JSON API
-  static/       single-page browser UI (draft, diff, review controls)
+  server.py     stdlib HTTP server + JSON API + read-only share pages
+  static/       single-page browser UI (draft, diff, review controls, share link)
 tests/          offline unit tests (no network)
 Dockerfile      non-root, read-only-friendly image
 deploy/helm/    one chart exposing image digest, ingress, probes, PVC
@@ -403,6 +406,53 @@ formats the trend cells the way Python does (`True`/`False`, integral floats as
 **v0.7.0** (Python package and Helm chart). No new third-party dependency is
 introduced; the standard library is still the only requirement.
 
+## Share links
+
+**Goal.** Release Note QA Copilot exists to turn raw changelog and ticket
+exports into a reviewable, sourced draft that a whole release team can inspect.
+A reviewer often has to hand a generated draft to a colleague — a support lead,
+a marketing editor or an approver — and the previous options were to copy-paste
+the Markdown, re-upload the source content or export a file. Share links remove
+that friction: the `draft_id` already returned by `POST /api/generate` becomes a
+**stable, read-only link** that anyone with the URL can open.
+
+**Intended users.** The same audience as the rest of the product — product and
+release managers, support and marketing reviewers, and the developers who wrote
+the changes — but with a focus on the *hand-off* step: passing a draft to a
+colleague who does not have the source data to hand and should not have to edit
+anything.
+
+**How it works.** When history is enabled (`DATA_DIR` set) the draft store keeps
+the parsed entries and the resolved workspace config alongside the Markdown. The
+share view loads that record, **re-runs** `qa.analyze_entries` and
+`profiles.rule_summary` on the stored entries and merges the current review
+status, so the page always reflects the heuristics that are live *now* rather
+than the flags computed when the draft was generated. Editing the QA rules
+changes every share link without regenerating the draft.
+
+**Endpoints.**
+
+| Endpoint | Response |
+| --- | --- |
+| `GET /s/<draft_id>` | A small self-contained `text/html; charset=utf-8` page: title, QA counts, review badge and the Markdown inside a `<pre>`, with inline CSS and no scripts or external stylesheets. |
+| `GET /api/share/<draft_id>` | The same payload as `application/json`: `{draft_id, title, markdown, qa, checklist, rules, review, created_at}`. |
+
+An unknown `draft_id` returns HTTP 404 with a JSON error body, and requesting a
+share link while `DATA_DIR` is unset returns HTTP 400 explaining that history is
+required. Both calls are pure reads: neither writes to disk. The endpoints reuse
+the existing body-size and JSON validation helpers and add no new dependency.
+
+**Limitations.** Share links require `DATA_DIR` (there is nothing to share
+without a stored draft), they are **unauthenticated** — anyone with the URL can
+read the draft — and they are **read-only**: the HTML page has no approve /
+reject controls and the JSON view is a snapshot, not an update endpoint.
+
+**Browser UI.** After a successful generate with a `draft_id`, the review
+controls gain a *Copy share link* button that copies `location.origin + '/s/' +
+draft_id` using `navigator.clipboard.writeText` with a
+`document.execCommand('copy')` fallback, and shows a hint when `DATA_DIR` is
+unset. The feature ships in **v0.8.0** (Python package and Helm chart).
+
 ## Deployment contract
 
 - Docker image builds for `linux/amd64` and `linux/arm64`, serves HTTP on port
@@ -428,6 +478,9 @@ introduced; the standard library is still the only requirement.
 - Persist workspace rules server-side and version them alongside drafts.
 - Profile libraries per organisation, with profile versions attached to a draft
   so a past sign-off can be replayed against the rules that were live then.
+- Authenticated, optionally expiring share links with per-recipient access
+  control — the read-only public share view landed in **v0.8.0**; access
+  control is still open.
 
 Per-workspace term and tone rules (was the first item in this list) landed in
 **v0.2.0** — see [Workspace configuration](#workspace-configuration).
@@ -442,6 +495,8 @@ Named, reusable QA rule profiles and the effective-rule summary landed in
 Multi-release trend analysis with sparklines and trend export landed in
 **v0.7.0** — see
 [Multi-release trend analysis](#multi-release-trend-analysis).
+Read-only draft share links for reviewer hand-off landed in **v0.8.0** — see
+[Share links](#share-links).
 
 ## Success signals
 

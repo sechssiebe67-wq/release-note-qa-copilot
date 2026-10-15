@@ -44,7 +44,13 @@ from .exporters import (
     trend_json,
 )
 from .storage import DraftStore, ReviewStore
-from .service import build_trend, record_review, get_review
+from .service import (
+    HistoryRequiredError,
+    build_trend,
+    get_review,
+    get_shared_draft,
+    record_review,
+)
 
 __all__ = [
     "ChangeEntry",
@@ -91,6 +97,8 @@ __all__ = [
     "ReviewStore",
     "record_review",
     "get_review",
+    "get_shared_draft",
+    "HistoryRequiredError",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"

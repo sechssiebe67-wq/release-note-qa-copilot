@@ -80,10 +80,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["format"], "json")
 
-    def test_version_is_0_7_0(self):
+    def test_version_is_0_8_0(self):
         status, body = self._get("/api/version")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["version"], "0.7.0")
+        self.assertEqual(json.loads(body)["version"], "0.8.0")
 
     def test_config_sample_endpoint(self):
         status, body = self._get("/api/config/sample")
@@ -974,6 +974,102 @@ class ServerReviewInMemoryTests(_ReviewServerMixin, unittest.TestCase):
         status, fetched = self._get_review("ephemeral")
         self.assertEqual(status, 200)
         self.assertEqual(fetched["status"], "approved")
+
+
+class ServerShareTests(_ReviewServerMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.env = mock.patch.dict(os.environ, {"DATA_DIR": cls.tmp.name})
+        cls.env.start()
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+        cls.env.stop()
+        cls.tmp.cleanup()
+
+    def _get_raw(self, path):
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=5) as resp:
+                return resp.status, resp.headers, resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers, exc.read()
+
+    def test_share_json_payload(self):
+        result = self._generate()
+        draft_id = result["draft_id"]
+        status, headers, body = self._get_raw("/api/share/" + draft_id)
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("application/json"))
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["draft_id"], draft_id)
+        self.assertEqual(payload["title"], result["title"])
+        self.assertEqual(payload["markdown"], result["markdown"])
+        self.assertIn("publishable", payload["qa"])
+        self.assertIn("counts", payload["qa"])
+        self.assertIn("checklist", payload)
+        self.assertIn("flag_counts", payload["rules"])
+        self.assertIn("status", payload["review"])
+
+    def test_share_unknown_id_is_404(self):
+        status, headers, body = self._get_raw("/api/share/does-not-exist")
+        self.assertEqual(status, 404)
+        self.assertTrue(headers["Content-Type"].startswith("application/json"))
+        self.assertIn("error", json.loads(body.decode("utf-8")))
+
+    def test_share_html_page(self):
+        result = self._generate()
+        draft_id = result["draft_id"]
+        status, headers, body = self._get_raw("/s/" + draft_id)
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/html"))
+        self.assertIn("charset=utf-8", headers["Content-Type"])
+        text = body.decode("utf-8")
+        self.assertIn(result["title"], text)
+        self.assertIn(result["markdown"], text)
+        self.assertNotIn("<script src", text)
+        self.assertNotIn('rel="stylesheet"', text)
+
+    def test_share_reflects_review_status(self):
+        result = self._generate()
+        draft_id = result["draft_id"]
+        self._post_review(
+            {"draft_id": draft_id, "status": "approved", "reviewer": "Ada"}
+        )
+        _status, _headers, body = self._get_raw("/api/share/" + draft_id)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["review"]["status"], "approved")
+
+
+class ServerShareNoHistoryTests(_ReviewServerMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.env = mock.patch.dict(os.environ, {})
+        cls.env.start()
+        os.environ.pop("DATA_DIR", None)
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+        cls.env.stop()
+
+    def test_share_without_history_is_400(self):
+        try:
+            with urllib.request.urlopen(
+                self.base + "/api/share/anything", timeout=5
+            ) as resp:
+                status = resp.status
+                body = resp.read()
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            body = exc.read()
+        self.assertEqual(status, 400)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertIn("error", payload)
+        self.assertIn("DATA_DIR", payload["error"])
 
 
 if __name__ == "__main__":

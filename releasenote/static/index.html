@@ -291,8 +291,10 @@
         <button id="approveReview" type="button">Approve</button>
         <button id="rejectReview" class="secondary" type="button">Reject</button>
         <button id="resetReview" class="secondary" type="button">Reset to pending</button>
+        <button id="copyShare" class="secondary" type="button">Copy share link</button>
       </div>
       <div id="reviewAudit" class="muted" style="margin-top:.5rem"></div>
+      <div id="shareStatus" class="muted" style="margin-top:.4rem"></div>
     </section>
 
     <section style="grid-column: 1 / -1;">
@@ -537,6 +539,7 @@
       $("downloadDiffCsv").hidden = !result.diff;
 
       lastDraftId = result.draft_id || null;
+      $("shareStatus").textContent = "";
       if (lastDraftId) {
         $("reviewSection").hidden = false;
         $("reviewHint").hidden = true;
@@ -910,6 +913,35 @@
       }
     }
 
+    function fallbackCopyLink(text, done) {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      let ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      document.body.removeChild(area);
+      if (ok) done();
+      else $("shareStatus").textContent = "Copy failed. Share link: " + text;
+    }
+
+    function copyShareLink() {
+      if (!lastDraftId) {
+        $("status").textContent = "Generate a draft with a draft_id first.";
+        return;
+      }
+      const link = location.origin + "/s/" + lastDraftId;
+      const done = () => { $("shareStatus").textContent = "Share link copied: " + link; };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(link).then(done).catch(() => fallbackCopyLink(link, done));
+      } else {
+        fallbackCopyLink(link, done);
+      }
+    }
+
     async function submitReview(status) {
       if (!lastDraftId) { $("status").textContent = "Generate a draft with a draft_id first."; return; }
       $("status").textContent = "Recording review…";
@@ -972,6 +1004,7 @@
     $("approveReview").addEventListener("click", () => submitReview("approved"));
     $("rejectReview").addEventListener("click", () => submitReview("rejected"));
     $("resetReview").addEventListener("click", () => submitReview("pending"));
+    $("copyShare").addEventListener("click", copyShareLink);
     loadSample("csv");
     loadHistory();
     loadProfiles();

@@ -6,6 +6,7 @@ dependency free. The server exposes a small JSON API plus a browser UI.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import sys
@@ -33,10 +34,12 @@ from .profiles import (
     resolve_config,
 )
 from .service import (
+    HistoryRequiredError,
     build_diff,
     build_draft,
     build_trend,
     get_review,
+    get_shared_draft,
     record_review,
     sample,
     sample_trend,
@@ -81,6 +84,119 @@ def _read_static(name: str) -> bytes:
     path = os.path.join(STATIC_DIR, name)
     with open(path, "rb") as handle:
         return handle.read()
+
+
+# Inline styling for the read-only share page. No external stylesheet or
+# script is referenced so the page is fully self-contained and dependency free.
+_SHARE_CSS = """
+:root { color-scheme: light dark; --bg:#0f172a; --panel:#1e293b; --text:#e2e8f0;
+  --muted:#94a3b8; --accent:#38bdf8; --high:#f87171; --medium:#fbbf24;
+  --pass:#34d399; --border:#334155; }
+* { box-sizing: border-box; }
+body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system,
+  "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text);
+  line-height:1.5; }
+main { max-width:960px; margin:0 auto; padding:1.5rem 1.25rem 3rem; }
+h1 { margin:0 0 .25rem; font-size:1.5rem; }
+.summary { display:flex; gap:.5rem; flex-wrap:wrap; margin:.75rem 0; }
+.pill { padding:.2rem .6rem; border-radius:999px; font-size:.8rem;
+  border:1px solid var(--border); }
+.pill.high, .pill.rejected { color:var(--high); border-color:var(--high); }
+.pill.medium, .pill.pending { color:var(--medium); border-color:var(--medium); }
+.pill.pass, .pill.approved { color:var(--pass); border-color:var(--pass); }
+pre { background:#0b1220; border:1px solid var(--border); border-radius:8px;
+  padding:.8rem; overflow:auto; font-size:.82rem; white-space:pre-wrap;
+  word-break:break-word; }
+a { color:var(--accent); }
+.muted { color:var(--muted); font-size:.85rem; }
+""".strip()
+
+
+def _share_badge_class(value: str) -> str:
+    if value in ("high", "rejected"):
+        return "high"
+    if value in ("medium", "pending"):
+        return "medium"
+    return "pass"
+
+
+def _render_share_html(payload: Dict[str, Any]) -> str:
+    """Render a stored draft as a small, self-contained read-only HTML page.
+
+    The title, Markdown, QA counts and review badge are HTML-escaped before
+    insertion, so untrusted draft content cannot inject markup. No external
+    stylesheet or script is referenced.
+    """
+    title = html.escape(str(payload.get("title") or "Release Notes"))
+    markdown = html.escape(str(payload.get("markdown") or ""))
+    qa = payload.get("qa") or {}
+    counts = qa.get("counts") or {}
+    rules = payload.get("rules") or {}
+    publishable = bool(qa.get("publishable"))
+    review = payload.get("review") or {}
+    status = str(review.get("status") or "pending")
+    draft_id = html.escape(str(payload.get("draft_id") or ""))
+    reviewer = html.escape(str(review.get("reviewer") or ""))
+
+    publish_pill = '<span class="pill {}">{}</span>'.format(
+        "pass" if publishable else "high",
+        "publishable" if publishable else "not publishable",
+    )
+    review_bits = '<span class="pill {}">review: {}</span>'.format(
+        _share_badge_class(status), html.escape(status)
+    )
+    if reviewer:
+        review_bits += '<span class="pill">reviewer: {}</span>'.format(reviewer)
+
+    entry_count = rules.get("entry_count", 0)
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n<head>\n<meta charset="utf-8" />\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1" />\n'
+        "<title>{title} - Release Note QA Copilot</title>\n"
+        "<style>\n{css}\n</style>\n</head>\n<body>\n<main>\n"
+        "<h1>{title}</h1>\n"
+        '<p class="muted">Read-only shared draft <code>{draft_id}</code>. '
+        "This link is unauthenticated.</p>\n"
+        '<div class="summary">'
+        '<span class="pill">{entry_count} entries</span>{publish_pill}'
+        '<span class="pill high">{high} high</span>'
+        '<span class="pill medium">{medium} medium</span>'
+        '<span class="pill">{total} flags</span>{review_bits}'
+        "</div>\n"
+        "<h2>Draft</h2>\n<pre>{markdown}</pre>\n"
+        '<p><a href="/">Back to Release Note QA Copilot</a></p>\n'
+        "</main>\n</body>\n</html>\n"
+    ).format(
+        title=title,
+        css=_SHARE_CSS,
+        draft_id=draft_id,
+        entry_count=html.escape(str(entry_count)),
+        publish_pill=publish_pill,
+        high=html.escape(str(counts.get("high", 0))),
+        medium=html.escape(str(counts.get("medium", 0))),
+        total=html.escape(str(counts.get("total", 0))),
+        review_bits=review_bits,
+        markdown=markdown,
+    )
+
+
+def _render_share_error(message: str) -> str:
+    """Render a minimal HTML error page for an unavailable share link."""
+    title = "Share link unavailable"
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n<head>\n<meta charset="utf-8" />\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1" />\n'
+        "<title>{title}</title>\n<style>\n{css}\n</style>\n</head>\n<body>\n"
+        '<main>\n<h1>{title}</h1>\n<p class="muted">{message}</p>\n'
+        '<p><a href="/">Back to Release Note QA Copilot</a></p>\n'
+        "</main>\n</body>\n</html>\n"
+    ).format(
+        title=title,
+        css=_SHARE_CSS,
+        message=html.escape(str(message)),
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -156,6 +272,9 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/healthz", "/readyz"):
             self._send(200, b"ok", "text/plain; charset=utf-8")
             return
+        if path.startswith("/s/"):
+            self._handle_share_html(path[len("/s/"):])
+            return
         if path == "/api/version":
             self._send_json(200, {"name": "release-note-qa-copilot", "version": __version__})
             return
@@ -200,6 +319,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": str(exc)})
                 return
             self._send_json(200, payload)
+            return
+        if path.startswith("/api/share/"):
+            draft_id = path[len("/api/share/"):]
+            payload = self._shared_draft(draft_id, json_errors=True)
+            if payload is not None:
+                self._send_json(200, payload)
             return
         if path in _TREND_EXPORTS:
             self._handle_trend_export(path, parsed)
@@ -329,6 +454,51 @@ class Handler(BaseHTTPRequestHandler):
             {"Content-Disposition": 'attachment; filename="{}"'.format(filename)},
         )
 
+    def _shared_draft(
+        self, draft_id: str, json_errors: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """Load a stored draft for sharing, sending an error response on failure.
+
+        Returns the JSON-serialisable payload, or ``None`` after a response was
+        sent. An unset history store is reported as HTTP 400 (share links need
+        ``DATA_DIR``) and an unknown id as HTTP 404. Reading never writes to
+        disk.
+        """
+        store = getattr(self.server, "store", None)
+        review_store = getattr(self.server, "review_store", None)
+        try:
+            return get_shared_draft(draft_id, store, review_store)
+        except HistoryRequiredError as exc:
+            if json_errors:
+                self._send_json(400, {"error": str(exc)})
+            else:
+                self._send(
+                    400,
+                    _render_share_error(str(exc)).encode("utf-8"),
+                    "text/html; charset=utf-8",
+                )
+        except LookupError as exc:
+            if json_errors:
+                self._send_json(404, {"error": str(exc)})
+            else:
+                self._send(
+                    404,
+                    _render_share_error(str(exc)).encode("utf-8"),
+                    "text/html; charset=utf-8",
+                )
+        return None
+
+    def _handle_share_html(self, draft_id: str) -> None:
+        """Serve the read-only HTML share page for a stored draft."""
+        payload = self._shared_draft(draft_id, json_errors=False)
+        if payload is None:
+            return
+        self._send(
+            200,
+            _render_share_html(payload).encode("utf-8"),
+            "text/html; charset=utf-8",
+        )
+
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
 
@@ -342,6 +512,9 @@ class Handler(BaseHTTPRequestHandler):
             result["markdown"],
             result["entry_count"],
             result["qa"]["counts"]["high"],
+            entries=result.get("entries"),
+            config=result.get("config"),
+            profile=result.get("profile"),
         )
         result["draft_id"] = record["id"]
 
