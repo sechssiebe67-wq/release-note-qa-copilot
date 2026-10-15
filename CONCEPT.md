@@ -1,3 +1,118 @@
+# Release Note QA Copilot — Concept
+
+## Goal
+
+Release Note QA Copilot turns raw changelog and ticket exports into a
+**reviewable release-note draft** in which every core statement is linked to a
+source and risky wording is flagged before publishing.
+
+Publishers under time pressure tend to write benefits that are vague, not
+backed by evidence, or inconsistent across a release. The Copilot does not try
+to write marketing copy; it makes the draft **traceable and checkable**:
+
+- group entries into Features, Fixes, Breaking Changes and Other,
+- generate a Markdown draft with a customer benefit per entry,
+- attach each entry to its source/reference,
+- flag vague, unsupported or incomplete claims,
+- produce a short QA checklist for release approval,
+- export the draft as Markdown (Confluence, GitHub Releases, e-mail).
+
+## Intended users
+
+- Product and release managers in B2B SaaS teams with weekly to monthly
+  releases.
+- Support and marketing reviewers who need to sign off on what customers read.
+- Developers who want a clear, sourced summary of the changes they shipped.
+
+## Current capabilities
+
+The MVP is a dependency-free Python web application:
+
+| Capability | Detail |
+| --- | --- |
+| Import | CSV or JSON changelog/ticket exports, flexible header aliases, auto-detect |
+| Grouping | Features, Fixes, Breaking Changes, Other |
+| Draft | Markdown with grouped sections and a customer benefit per entry |
+| Traceability | Source/link rendered next to every entry |
+| QA | Flags missing source, vague language, unsupported quantified claims, missing benefit, undocumented breaking changes |
+| Checklist | Five pass/warn/fail checks plus a publishability verdict |
+| Export | Markdown download; JSON API for automation |
+| History | Optional file-backed store of generated drafts (`DATA_DIR`) |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/history`, `POST /api/generate` |
+
+The UI is a single page (`releasenote/static/index.html`): paste or load sample
+data, generate, inspect QA flags and copy/download the Markdown.
+
+## Architecture
+
+```
+releasenote/
+  models.py     ChangeEntry, Flag, QAResult, canonical groups
+  importer.py   CSV/JSON parsing + header aliasing
+  grouping.py   bucketing by change type
+  qa.py         heuristic QA rules and checklist
+  generator.py  Markdown rendering with inline QA annotations
+  service.py    parse -> group -> qa -> render pipeline
+  storage.py    optional append-only draft history
+  server.py     stdlib HTTP server + JSON API
+  static/       single-page browser UI
+tests/          offline unit tests (no network)
+Dockerfile      non-root, read-only-friendly image
+deploy/helm/    one chart exposing image digest, ingress, probes, PVC
+```
+
+No database or external service is required. The server uses only the Python
+standard library, which keeps the image small and operating costs minimal.
+
+## QA rules
+
+Each rule is a deterministic heuristic so results are explainable:
+
+- **missing_source** (high): no source or link, so nothing can be traced.
+- **quantified_claim_without_source** (high): a number ("50%", "3x", "2 days")
+  without a source.
+- **vague_language** (medium): unmeasurable terms such as "better", "seamless",
+  "various".
+- **missing_benefit** (medium): a feature with no customer benefit.
+- **missing_description** (medium): an entry that cannot be verified.
+- **breaking_without_migration** (medium): a breaking change without migration
+  or required-action wording.
+- **missing_title** (high): an entry without a title.
+
+A draft is **publishable** once no high-severity flag remains.
+
+## Deployment contract
+
+- Docker image builds for `linux/amd64` and `linux/arm64`, serves HTTP on port
+  `8080`, and exposes `GET /healthz`.
+- Exactly one Helm chart lives in `deploy/helm/release-note-qa-copilot/`.
+- It renders `image.repository@image.digest` when a digest is pinned.
+- Ingress is configured through `ingress.enabled`, `ingress.host` and
+  `ingress.className`.
+- Resource requests/limits, non-root execution and a read-only root filesystem
+  are set. Optional persistence (`persistence.enabled`) mounts a PVC at `/data`.
+- `.github/workflows/factory-release.yml` builds reviewed merges and publishes
+  the immutable image manifest. The Factory manager publishes the chart;
+  product workflows never receive infrastructure credentials.
+
+## Next direction
+
+- Confluence / GitHub Releases / e-mail publish integrations behind a review
+  gate.
+- Team-specific term and tone rules configurable per workspace.
+- Optional LLM assistance for benefit wording that still cites a source.
+- Diff two releases to highlight regressions and repeated claims.
+- Multi-user roles (author / QA reviewer / approver) and audit log.
+
+## Success signals
+
+- Time from changelog import to approved draft.
+- Number of flagged claims resolved before publication.
+- Share of entries with a verified source.
+- Release approval rate on first review.
+
+---
+
 # Product Criteria
 
 ## Hard Requirements (MUST)

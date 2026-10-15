@@ -1,0 +1,89 @@
+# Default values for release-note-qa-copilot.
+
+replicaCount: 1
+
+image:
+  # The factory publishes ghcr.io/<owner>/<repo> and pins an immutable digest.
+  repository: ghcr.io/anomalyco/release-note-qa-copilot
+  # When set, the image is rendered as repository@digest.
+  digest: ""
+  # Used only when digest is empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  host: release-note-qa-copilot.example.com
+  annotations: {}
+  tls: []
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+livenessProbe:
+  enabled: true
+  path: /healthz
+  initialDelaySeconds: 5
+  periodSeconds: 30
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  enabled: true
+  path: /healthz
+  initialDelaySeconds: 3
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# The application is stateless and works without storage. Enabling
+# persistence mounts a dedicated volume at /data so generated drafts are
+# kept across restarts (sets DATA_DIR in the container).
+persistence:
+  enabled: false
+  mountPath: /data
+  size: 1Gi
+  accessMode: ReadWriteOnce
+  storageClass: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
