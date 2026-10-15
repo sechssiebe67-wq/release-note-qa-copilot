@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "release-note-qa-copilot.fullname" . }}
+  labels:
+    {{- include "release-note-qa-copilot.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "release-note-qa-copilot.selectorLabels" . | nindent 4 }}

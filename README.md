@@ -1,47 +1,109 @@
-# AI Pipes — empty starting point
+# Release Note QA Copilot
 
-This branch contains the autonomous development pipeline and an empty
-`CONCEPT.md`, with no product or product tests. Use it to improve the empty
-starting point or create new, independent projects.
+Turn a changelog or ticket export (CSV / JSON) into a **reviewable release-note
+draft** where every core statement is linked to a source and vague or
+unsupported claims are flagged before publishing.
 
-The first generated issue proposes a project from scratch. Its implementation
-fills `CONCEPT.md` and creates product files and tests. The pipeline documentation lives
-in [`.github/README.md`](.github/README.md), including the required GitHub secrets
-and repository settings.
+- Group changes into Features, Fixes, Breaking Changes and Other.
+- Generate a Markdown draft with a customer benefit per entry.
+- Trace each entry back to its source/ticket.
+- Flag missing sources, vague wording, unsupported numbers and undocumented
+  breaking changes.
+- Get a short QA checklist and a publishability verdict.
+- Export Markdown for Confluence, GitHub Releases or e-mail.
 
-## Start again in this repository
+See [CONCEPT.md](CONCEPT.md) for the product goal, users and roadmap.
 
-Merge this starting point into `main` when you are ready to start a new project.
-The push to `main` generates the first issue and starts the development cycle.
-Working on `empty-repo` does not start issue generation; the generator always
-uses `main`, even when started manually.
+## Run locally
 
-Existing issues, pull requests, branches, and history remain available. Avoid a
-commit message beginning with `chore(reset):`: that explicitly triggers cleanup
-of previous remote work when pushed to `main`.
-
-## Create an independent project
-
-Export this branch without its Git history:
+No dependencies beyond Python 3.8+ are required.
 
 ```sh
-mkdir ../my-new-project
-git archive empty-repo | tar -x -C ../my-new-project
-cd ../my-new-project
-git init -b main
-git add .
-git commit -m "chore: initialize empty development pipeline"
+python3 -m releasenote
+# open http://127.0.0.1:8080
 ```
 
-Create a GitHub repository, configure the secrets and settings documented in
-`.github/README.md`, then add its remote and push `main`. Each new repository
-has its own project and development cycle.
+Configuration:
 
-## Verify the pipeline locally
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HOST` | `0.0.0.0` | Listen address |
+| `PORT` | `8080` | Listen port |
+| `DATA_DIR` | unset | Enable draft history persisted below this directory |
+
+## HTTP API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/healthz` | Liveness/readiness probe (`ok`) |
+| GET | `/api/version` | Product name and version |
+| GET | `/api/sample?format=csv\|json` | Example import payload |
+| GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
+| GET | `/api/history/<id>` | One stored draft including Markdown |
+| POST | `/api/generate` | Build a draft |
+
+`POST /api/generate` body:
+
+```json
+{ "format": "auto", "title": "Release 2.0", "content": "<csv or json text>" }
+```
+
+Response contains `markdown`, `qa` (flags + counts + `publishable`),
+`checklist`, the grouped `entries`, and a `draft_id` when history is enabled.
+
+## Input format
+
+CSV with a header row, or JSON as a list / `{ "entries": [...] }`. Recognised
+columns and common aliases:
+
+| Field | Aliases |
+| --- | --- |
+| `id` | ticket, ticket_id, key, issue, number |
+| `type` | category, kind, change_type |
+| `title` | summary, name, headline |
+| `description` | body, details, text |
+| `benefit` | customer_benefit, value, impact |
+| `source` | source_ref, reference, evidence |
+| `link` | url |
+| `audience` | persona, segment |
+
+`type` accepts `feature`/`enhancement`/`new`, `fix`/`bug`/`patch`,
+`breaking`/`deprecation` and `other`/`chore`/`docs`.
+
+## Test
 
 ```sh
-python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+python3 -m unittest discover -s tests -v
 ```
 
-CI runs these pipeline tests on every push and pull request, and also runs
-product tests from `tests/` once that directory exists.
+## Docker
+
+```sh
+docker build -t release-note-qa-copilot .
+docker run --rm -p 8080:8080 release-note-qa-copilot
+```
+
+The image runs as a non-root user (UID 10001) and works with a read-only root
+filesystem.
+
+## Deploy
+
+The Helm chart lives in `deploy/helm/release-note-qa-copilot/`:
+
+```sh
+helm install release-note-qa-copilot deploy/helm/release-note-qa-copilot \
+  --set image.repository=ghcr.io/OWNER/REPO \
+  --set image.digest=sha256:... \
+  --set ingress.enabled=true \
+  --set ingress.host=release-notes.example.com \
+  --set ingress.className=nginx
+```
+
+`.github/workflows/factory-release.yml` builds reviewed merges for
+`linux/amd64` and `linux/arm64` and publishes the immutable image manifest.
+
+## Pipeline
+
+This repository is developed by the autonomous pipeline documented in
+[`.github/README.md`](.github/README.md). Pipeline tests run with
+`python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v`.

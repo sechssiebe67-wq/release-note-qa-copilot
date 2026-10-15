@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Release Note QA Copilot</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --panel-2: #273449;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --high: #f87171;
+      --medium: #fbbf24;
+      --pass: #34d399;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header {
+      padding: 1.5rem 1.25rem 0.5rem;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
+    header p { margin: 0; color: var(--muted); }
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 1rem 1.25rem 3rem;
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: 1fr 1fr;
+    }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+    }
+    label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: .3rem; }
+    select, input, textarea, button {
+      font: inherit;
+      color: var(--text);
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: .5rem .6rem;
+      width: 100%;
+    }
+    textarea { min-height: 260px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
+    .row { display: flex; gap: .5rem; align-items: end; flex-wrap: wrap; }
+    .row > * { flex: 1; min-width: 140px; }
+    button {
+      background: var(--accent);
+      color: #06283a;
+      border: none;
+      font-weight: 600;
+      cursor: pointer;
+      width: auto;
+      padding: .55rem 1.1rem;
+    }
+    button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+    button:disabled { opacity: .6; cursor: progress; }
+    .status { color: var(--muted); font-size: .85rem; margin-top: .5rem; min-height: 1.2em; }
+    .summary { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: .75rem; }
+    .pill { padding: .2rem .6rem; border-radius: 999px; font-size: .8rem; border: 1px solid var(--border); }
+    .pill.high { color: var(--high); border-color: var(--high); }
+    .pill.medium { color: var(--medium); border-color: var(--medium); }
+    .pill.pass { color: var(--pass); border-color: var(--pass); }
+    ul.checklist { list-style: none; padding: 0; margin: 0 0 1rem; }
+    ul.checklist li { padding: .35rem 0; border-bottom: 1px dashed var(--border); font-size: .9rem; }
+    .flag { font-size: .82rem; padding: .35rem .5rem; border-radius: 6px; margin: .2rem 0; background: var(--panel-2); }
+    .flag.high { border-left: 3px solid var(--high); }
+    .flag.medium { border-left: 3px solid var(--medium); }
+    .flag.low { border-left: 3px solid var(--muted); }
+    pre {
+      background: #0b1220;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: .8rem;
+      overflow: auto;
+      max-height: 520px;
+      font-size: .82rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .muted { color: var(--muted); font-size: .85rem; }
+    .entry-block { margin-bottom: 1rem; }
+    .entry-block h3 { margin: .3rem 0; font-size: 1rem; }
+    .entry-block code { color: var(--accent); }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Release Note QA Copilot</h1>
+    <p>Paste a changelog or ticket export (CSV / JSON). Get a sourced draft and a QA checklist.</p>
+  </header>
+  <main>
+    <section>
+      <div class="row">
+        <div>
+          <label for="format">Input format</label>
+          <select id="format">
+            <option value="auto">Auto detect</option>
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+          </select>
+        </div>
+        <div>
+          <label for="title">Draft title</label>
+          <input id="title" value="Release Notes" />
+        </div>
+      </div>
+      <div style="margin-top:.6rem">
+        <label for="content">Changelog / ticket data</label>
+        <textarea id="content" spellcheck="false" placeholder="id,type,title,description,benefit,source,link,audience&#10;REL-1,feature,Bulk export,Export all reports,Cuts weekly effort,REL-1,https://...,admins"></textarea>
+      </div>
+      <div class="row" style="margin-top:.6rem">
+        <button id="generate">Generate draft</button>
+        <button id="loadCsv" class="secondary">Load CSV sample</button>
+        <button id="loadJson" class="secondary">Load JSON sample</button>
+      </div>
+      <div class="status" id="status"></div>
+    </section>
+
+    <section>
+      <div class="summary" id="summary"></div>
+      <ul class="checklist" id="checklist"></ul>
+      <div id="entries"></div>
+    </section>
+
+    <section style="grid-column: 1 / -1;">
+      <div class="row">
+        <div><label>Markdown draft</label></div>
+        <button id="download" class="secondary" style="flex:0; min-width:auto;">Download .md</button>
+      </div>
+      <pre id="markdown" aria-live="polite"></pre>
+    </section>
+
+    <section style="grid-column: 1 / -1;">
+      <label>Recent drafts</label>
+      <div id="history" class="muted">No stored drafts.</div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    // Escape untrusted changelog/ticket fields before inserting into innerHTML.
+    const ESCAPE_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+    const esc = (value) => String(value).replace(/[&<>"']/g, (c) => ESCAPE_MAP[c]);
+    let lastMarkdown = "";
+
+    async function api(path, options) {
+      const res = await fetch(path, options);
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch (e) { data = { error: text }; }
+      if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+      return data;
+    }
+
+    async function loadSample(format) {
+      try {
+        const data = await api("/api/sample?format=" + format);
+        $("format").value = data.format;
+        $("content").value = data.content;
+        $("status").textContent = "Sample " + data.format.toUpperCase() + " loaded.";
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      }
+    }
+
+    function renderFlags(flags) {
+      if (!flags.length) return '<div class="muted">No flags.</div>';
+      return flags.map(f =>
+        '<div class="flag ' + esc(f.severity) + '"><strong>' + esc(f.code) + '</strong> — ' + esc(f.message) + '</div>'
+      ).join("");
+    }
+
+    function renderResult(result) {
+      const counts = result.qa.counts;
+      $("summary").innerHTML =
+        '<span class="pill">' + esc(result.entry_count) + ' entries</span>' +
+        '<span class="pill ' + (result.qa.publishable ? "pass" : "high") + '">' +
+          (result.qa.publishable ? "publishable" : "not publishable") + '</span>' +
+        '<span class="pill high">' + esc(counts.high) + ' high</span>' +
+        '<span class="pill medium">' + esc(counts.medium) + ' medium</span>' +
+        '<span class="pill">' + esc(counts.total) + ' flags</span>';
+
+      $("checklist").innerHTML = result.checklist.map(item => {
+        const icon = item.status === "pass" ? "\u2705" : (item.status === "warn" ? "\u26a0" : "\u274c");
+        return '<li>' + icon + ' ' + esc(item.label) + ' <span class="muted">— ' + esc(item.detail) + '</span></li>';
+      }).join("");
+
+      const byId = {};
+      result.qa.flags.forEach(f => { (byId[f.entry_id] = byId[f.entry_id] || []).push(f); });
+
+      $("entries").innerHTML = result.entries.map(e => {
+        const flags = byId[e.id] || [];
+        return '<div class="entry-block">' +
+          '<h3>' + esc(e.title || "(untitled)") + '</h3>' +
+          '<div class="muted">' + esc(e.type) + ' · <code>' + esc(e.id) + '</code></div>' +
+          '<div>' + esc(e.description || "") + '</div>' +
+          '<div class="muted">Source: ' + esc(e.source || e.link || "none") + '</div>' +
+          renderFlags(flags) +
+        '</div>';
+      }).join("");
+
+      lastMarkdown = result.markdown;
+      $("markdown").textContent = result.markdown;
+    }
+
+    async function generate() {
+      const content = $("content").value;
+      if (!content.trim()) { $("status").textContent = "Paste some data first."; return; }
+      $("generate").disabled = true;
+      $("status").textContent = "Generating…";
+      try {
+        const result = await api("/api/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content: content,
+            format: $("format").value,
+            title: $("title").value
+          })
+        });
+        renderResult(result);
+        $("status").textContent = "Draft generated.";
+        loadHistory();
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      } finally {
+        $("generate").disabled = false;
+      }
+    }
+
+    function download() {
+      if (!lastMarkdown) { $("status").textContent = "Generate a draft first."; return; }
+      const blob = new Blob([lastMarkdown], { type: "text/markdown" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "release-notes.md";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    async function loadHistory() {
+      try {
+        const data = await api("/api/history?limit=10");
+        if (!data.drafts.length) { $("history").textContent = "No stored drafts."; return; }
+        $("history").innerHTML = data.drafts.map(d =>
+          '<div class="flag low"><strong>' + esc(d.title) + '</strong> — ' +
+          esc(d.entry_count) + ' entries · ' + esc(d.high_flags) + ' high · ' +
+          esc(new Date(d.created_at).toLocaleString()) + '</div>'
+        ).join("");
+      } catch (err) {
+        $("history").textContent = "";
+      }
+    }
+
+    $("generate").addEventListener("click", generate);
+    $("loadCsv").addEventListener("click", () => loadSample("csv"));
+    $("loadJson").addEventListener("click", () => loadSample("json"));
+    $("download").addEventListener("click", download);
+    loadSample("csv");
+    loadHistory();
+  </script>
+</body>
+</html>
