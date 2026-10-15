@@ -38,18 +38,21 @@ The MVP is a dependency-free Python web application:
 | QA | Flags missing source, vague language, unsupported quantified claims, missing benefit, undocumented breaking changes |
 | Checklist | Five pass/warn/fail checks plus a publishability verdict |
 | Diff | Compare two drafts: added / changed / removed / unchanged entries, repeated claims and regressions |
-| Export | Markdown download plus CSV/JSON downloads of QA flags, checklist, diff and the full draft; `GET /api/export/*` for automation |
+| Export | Markdown download plus CSV/JSON downloads of QA flags, checklist, diff, effective rules and the full draft; `GET /api/export/*` for automation |
 | History | Optional file-backed store of generated drafts (`DATA_DIR`) |
 | Review workflow | Mark a draft `pending` / `approved` / `rejected` with reviewer + comment; every transition appended to an append-only audit log; in-memory fallback when `DATA_DIR` is unset |
 | Workspace rules | Per-workspace JSON config: extra/allowed vague terms, banned phrases, required sections, severity overrides |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/history`, `GET /api/review/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review` |
+| QA rule profiles | Named, reusable rule sets (`strict`, `marketing-safe`, `internal`) that bundle a `WorkspaceConfig` with a description; attach a profile to a draft and get an effective-rule summary |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/history`, `GET /api/review/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
-data, generate, inspect QA flags and copy/download the Markdown. After a
-successful generate it also offers *Download QA CSV*, *Download checklist CSV*
-and *Download JSON*; after a diff it adds *Download diff CSV*. Those downloads
-are built in the browser from the payload already on screen, so they need no
-extra server round-trip.
+data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
+profile* selector defaults to *none* so current behaviour is unchanged; picking
+a profile pre-fills the *Workspace rules* panel. After a successful generate it
+also offers *Download QA CSV*, *Download checklist CSV*, *Download JSON*,
+*Download rules CSV* and *Download rules JSON*; after a diff it adds *Download
+diff CSV*. Those downloads are built in the browser from the payload already on
+screen, so they need no extra server round-trip.
 
 ## Architecture
 
@@ -57,6 +60,7 @@ extra server round-trip.
 releasenote/
   models.py     ChangeEntry, Flag, QAResult, canonical groups
   config.py     WorkspaceConfig: validated per-workspace QA rule overrides
+  profiles.py   named reusable rule profiles + effective-rule summary
   importer.py   CSV/JSON parsing + header aliasing
   grouping.py   bucketing by change type
   qa.py         heuristic QA rules, workspace overrides and checklist
@@ -263,6 +267,62 @@ same 2 MiB body cap and JSON-object validation as the rest of the API and add
 no new dependencies. The feature ships in **v0.5.0** (Python package and Helm
 chart).
 
+## QA rule profiles
+
+Workspace configuration (v0.2.0) lets a team express *what* its QA rules are,
+but it is passed inline on every request and there is no way to **name**, list
+or reuse a known rule set. A reviewer signing off a draft therefore cannot
+easily tell whether a clean draft is clean because the rules were lenient or
+because the entries were genuinely good.
+
+A **QA rule profile** is a named, reusable bundle of a `WorkspaceConfig` plus a
+human-readable `description`. Profiles make the *effective rules* explicit:
+the draft payload and the UI show exactly which vague terms, banned phrases,
+required sections and severity overrides were active, and how many flags of
+each code actually fired.
+
+**Built-in sample profiles.** `releasenote.profiles.BUILTIN_PROFILES` ships
+three profiles, each a valid `WorkspaceConfig`:
+
+| Profile | Purpose |
+| --- | --- |
+| `strict` | Re-ranks `vague_language` to `high` and requires a `breaking` section, so loose wording blocks sign-off. |
+| `marketing-safe` | Bans common hype phrases (`world's best`, `best-in-class`, `game-changing`, `guaranteed`, `revolutionary`, `cutting-edge`). |
+| `internal` | Allows internal shorthand terms (`misc`, `stuff`, `things`, `various`, `several`) that are acceptable for internal audiences. |
+
+**Attaching and layering.** `POST /api/generate` and `POST /api/diff` accept an
+optional `profile` string alongside the existing inline `config`. A profile
+must be known; an unknown name returns HTTP 400 naming the profile and stores
+no draft. When both are supplied the profile is applied first and the inline
+config is layered on top (list fields are unioned, `severity_overrides` merge
+with the inline entry winning). `releasenote.profiles.resolve_config` performs
+this resolution and returns a validated `WorkspaceConfig`. The response echoes
+the resolved `profile` (or `null`) and the merged `config`.
+
+**Effective-rule summary.** Every draft payload gains a `rules` object built by
+`releasenote.profiles.rule_summary`: the effective vague-term list, the banned
+phrases, the required sections, every severity override, and per flag code the
+number of flags that fired (plus the severity each code resolved to). Because
+it is derived from the same deterministic heuristics as the flags themselves,
+the summary explains *why* a draft was flagged.
+
+**Endpoints.**
+
+| Endpoint | Response |
+| --- | --- |
+| `GET /api/profiles` | The built-in profiles as `{"profiles": [{"name", "description", "config"}]}`. |
+| `GET /api/export/rules.csv` | `code,severity,count` — one row per firing flag code, header only when nothing fired. |
+| `GET /api/export/rules.json` | The full `rules` summary for a draft. |
+
+The export endpoints reuse the `format`, `title`, `content` (and `previous` /
+`current` for the diff) query contract of the other exports and additionally
+accept an optional `profile`. They answer with `text/csv` or
+`application/json` and a `Content-Disposition: attachment` header; an unknown
+profile returns HTTP 400, missing parameters HTTP 400 and unparseable content
+HTTP 422. The UI adds a profile selector and the *Download rules CSV* /
+*Download rules JSON* buttons. The feature ships in **v0.6.0** (Python package
+and Helm chart).
+
 ## Deployment contract
 
 - Docker image builds for `linux/amd64` and `linux/arm64`, serves HTTP on port
@@ -286,6 +346,8 @@ chart).
   role enforcement are still open.
 - Optional LLM assistance for benefit wording that still cites a source.
 - Persist workspace rules server-side and version them alongside drafts.
+- Profile libraries per organisation, with profile versions attached to a draft
+  so a past sign-off can be replayed against the rules that were live then.
 
 Per-workspace term and tone rules (was the first item in this list) landed in
 **v0.2.0** — see [Workspace configuration](#workspace-configuration).
@@ -295,6 +357,8 @@ Machine-readable CSV / JSON export of the QA result and diff landed in
 **v0.4.0** — see [Export](#export).
 The review workflow and audit trail landed in **v0.5.0** — see
 [Review workflow](#review-workflow).
+Named, reusable QA rule profiles and the effective-rule summary landed in
+**v0.6.0** — see [QA rule profiles](#qa-rule-profiles).
 
 ## Success signals
 

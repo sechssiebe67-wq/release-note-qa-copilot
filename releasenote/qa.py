@@ -67,6 +67,18 @@ def _effective_vague_terms(config: WorkspaceConfig) -> List[str]:
     return terms
 
 
+def effective_vague_terms(
+    config: Optional[WorkspaceConfig] = None
+) -> List[str]:
+    """Return the effective vague-term list for ``config``.
+
+    Combines the built-in terms with ``extra_vague_terms`` and removes
+    ``allow_terms`` (case-insensitive), preserving order and dropping
+    duplicates. Used by the rule summary so it matches the QA heuristics.
+    """
+    return _effective_vague_terms(config or WorkspaceConfig.default())
+
+
 def _vague_pattern(config: WorkspaceConfig):
     """Return a compiled vague-term regex for the effective term list."""
     if config.is_default():

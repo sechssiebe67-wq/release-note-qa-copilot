@@ -145,7 +145,15 @@
 
       <details id="rulesPanel">
         <summary>Workspace rules</summary>
-        <p class="muted">Tailor the QA heuristics to your team's vocabulary. One term per line or comma separated.</p>
+        <div class="row">
+          <div>
+            <label for="profile">QA rule profile</label>
+            <select id="profile">
+              <option value="">(none — built-in rules)</option>
+            </select>
+          </div>
+        </div>
+        <p class="muted">Pick a profile to pre-fill these fields, then tailor them. One term per line or comma separated.</p>
         <div class="row">
           <div>
             <label for="cfgExtra">Extra vague terms</label>
@@ -225,6 +233,7 @@
     <section>
       <div class="summary" id="summary"></div>
       <div class="summary" id="configSummary"></div>
+      <div class="summary" id="rulesSummary"></div>
       <ul class="checklist" id="checklist"></ul>
       <div id="entries"></div>
     </section>
@@ -269,6 +278,8 @@
         <button id="downloadQaCsv" class="secondary" type="button">Download QA CSV</button>
         <button id="downloadChecklistCsv" class="secondary" type="button">Download checklist CSV</button>
         <button id="downloadJson" class="secondary" type="button">Download JSON</button>
+        <button id="downloadRulesCsv" class="secondary" type="button">Download rules CSV</button>
+        <button id="downloadRulesJson" class="secondary" type="button">Download rules JSON</button>
         <button id="downloadDiffCsv" class="secondary" type="button" hidden>Download diff CSV</button>
       </div>
       <pre id="markdown" aria-live="polite"></pre>
@@ -288,6 +299,7 @@
     let lastMarkdown = "";
     let lastResult = null;
     let lastDraftId = null;
+    let profilesByName = {};
 
     async function api(path, options) {
       const res = await fetch(path, options);
@@ -356,6 +368,26 @@
       ].join("");
     }
 
+    function renderRules(rules) {
+      if (!rules) return "";
+      const counts = rules.flag_counts || {};
+      const severities = rules.flag_severities || {};
+      const countPills = Object.keys(counts).sort().map(code =>
+        '<span class="pill">' + esc(code) + ': ' + esc(counts[code]) +
+        ' (' + esc(severities[code] || "") + ')</span>'
+      ).join("");
+      const overridePills = Object.keys(rules.severity_overrides || {}).sort().map(code =>
+        '<span class="pill">' + esc(code) + ' → ' + esc(rules.severity_overrides[code]) + '</span>'
+      ).join("");
+      return [
+        '<span class="pill">vague terms: ' + esc((rules.effective_vague_terms || []).join(", ")) + '</span>',
+        '<span class="pill">banned: ' + esc((rules.banned_phrases || []).join(", ")) + '</span>',
+        '<span class="pill">required: ' + esc((rules.required_sections || []).join(", ")) + '</span>',
+        overridePills,
+        countPills
+      ].join("");
+    }
+
     function parseList(value) {
       return value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
     }
@@ -401,6 +433,41 @@
       }
     }
 
+    function applyProfile(profile) {
+      const config = profile.config || {};
+      $("cfgExtra").value = (config.extra_vague_terms || []).join("\n");
+      $("cfgAllow").value = (config.allow_terms || []).join("\n");
+      $("cfgBanned").value = (config.banned_phrases || []).join("\n");
+      $("cfgRequired").value = (config.required_sections || []).join("\n");
+      const overrides = config.severity_overrides || {};
+      const codes = Object.keys(overrides);
+      document.querySelectorAll("[data-override-code]").forEach((input, i) => {
+        const code = codes[i] || "";
+        input.value = code;
+        const select = input.parentElement.querySelector("[data-override-severity]");
+        if (select) select.value = code ? overrides[code] : "";
+      });
+      $("status").textContent = "Profile '" + profile.name + "' applied.";
+    }
+
+    async function loadProfiles() {
+      try {
+        const data = await api("/api/profiles");
+        const select = $("profile");
+        (data.profiles || []).forEach(profile => {
+          profilesByName[profile.name] = profile;
+          const option = document.createElement("option");
+          option.value = profile.name;
+          option.textContent = profile.description
+            ? profile.name + " — " + profile.description
+            : profile.name;
+          select.appendChild(option);
+        });
+      } catch (err) {
+        // The selector simply stays at "(none)" if profiles are unavailable.
+      }
+    }
+
     function renderResult(result) {
       const counts = result.qa.counts;
       $("summary").innerHTML =
@@ -412,6 +479,7 @@
         '<span class="pill">' + esc(counts.total) + ' flags</span>';
 
       $("configSummary").innerHTML = renderConfig(result.config);
+      $("rulesSummary").innerHTML = renderRules(result.rules);
 
       $("checklist").innerHTML = result.checklist.map(item => {
         const icon = item.status === "pass" ? "\u2705" : (item.status === "warn" ? "\u26a0" : "\u274c");
@@ -464,6 +532,8 @@
       };
       const config = collectConfig();
       if (Object.keys(config).length) body.config = config;
+      const profile = $("profile").value;
+      if (profile) body.profile = profile;
       try {
         const result = await api("/api/generate", {
           method: "POST",
@@ -497,6 +567,8 @@
       };
       const config = collectConfig();
       if (Object.keys(config).length) body.config = config;
+      const profile = $("profile").value;
+      if (profile) body.profile = profile;
       try {
         const result = await api("/api/diff", {
           method: "POST",
@@ -570,6 +642,24 @@
     function downloadJson() {
       if (!lastResult) return;
       saveBlob("release-draft.json", JSON.stringify(lastResult, null, 2), "application/json");
+    }
+
+    function downloadRulesCsv() {
+      if (!lastResult || !lastResult.rules) return;
+      const rules = lastResult.rules;
+      const counts = rules.flag_counts || {};
+      const severities = rules.flag_severities || {};
+      const rows = Object.keys(counts).sort().map(code =>
+        [code, severities[code] || "", counts[code]]
+      );
+      saveBlob("qa-rules.csv",
+        buildCsv(["code", "severity", "count"], rows), "text/csv");
+    }
+
+    function downloadRulesJson() {
+      if (!lastResult || !lastResult.rules) return;
+      saveBlob("qa-rules.json",
+        JSON.stringify(lastResult.rules, null, 2), "application/json");
     }
 
     function download() {
@@ -662,11 +752,22 @@
     $("downloadChecklistCsv").addEventListener("click", downloadChecklistCsv);
     $("downloadDiffCsv").addEventListener("click", downloadDiffCsv);
     $("downloadJson").addEventListener("click", downloadJson);
+    $("downloadRulesCsv").addEventListener("click", downloadRulesCsv);
+    $("downloadRulesJson").addEventListener("click", downloadRulesJson);
+    $("profile").addEventListener("change", () => {
+      const name = $("profile").value;
+      if (!name) {
+        $("status").textContent = "No profile selected; built-in rules apply.";
+        return;
+      }
+      if (profilesByName[name]) applyProfile(profilesByName[name]);
+    });
     $("approveReview").addEventListener("click", () => submitReview("approved"));
     $("rejectReview").addEventListener("click", () => submitReview("rejected"));
     $("resetReview").addEventListener("click", () => submitReview("pending"));
     loadSample("csv");
     loadHistory();
+    loadProfiles();
   </script>
 </body>
 </html>

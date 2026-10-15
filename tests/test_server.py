@@ -80,10 +80,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["format"], "json")
 
-    def test_version_is_0_5_0(self):
+    def test_version_is_0_6_0(self):
         status, body = self._get("/api/version")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["version"], "0.5.0")
+        self.assertEqual(json.loads(body)["version"], "0.6.0")
 
     def test_config_sample_endpoint(self):
         status, body = self._get("/api/config/sample")
@@ -92,6 +92,88 @@ class ServerTests(unittest.TestCase):
         config = WorkspaceConfig.from_dict(payload)
         self.assertTrue(config.extra_vague_terms)
         self.assertEqual(payload, config.to_dict())
+
+    def test_profiles_endpoint_lists_builtins(self):
+        status, body = self._get("/api/profiles")
+        self.assertEqual(status, 200)
+        profiles = json.loads(body)["profiles"]
+        self.assertGreaterEqual(len(profiles), 3)
+        names = set()
+        for profile in profiles:
+            self.assertEqual(set(profile), {"name", "description", "config"})
+            WorkspaceConfig.from_dict(profile["config"])
+            names.add(profile["name"])
+        self.assertTrue({"strict", "marketing-safe", "internal"} <= names)
+
+    def test_generate_without_profile_or_config_matches_build_draft(self):
+        content = sample("csv")["content"]
+        status, result = self._post(
+            "/api/generate", {"content": content, "format": "csv"}
+        )
+        self.assertEqual(status, 200)
+        self.assertIsNone(result["profile"])
+        self.assertIn("rules", result)
+        expected = build_draft(content, "csv")
+        self.assertEqual(result["qa"], expected["qa"])
+        self.assertEqual(result["checklist"], expected["checklist"])
+        self.assertEqual(result["markdown"], expected["markdown"])
+
+    def test_generate_with_strict_profile(self):
+        content = (
+            "id,type,title,description,benefit,source\n"
+            "A,fix,Better sync,The sync is improved,"
+            "A much better experience,A\n"
+        )
+        status, result = self._post(
+            "/api/generate",
+            {"content": content, "format": "csv", "profile": "strict"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["profile"], "strict")
+        vague = [
+            f for f in result["qa"]["flags"] if f["code"] == "vague_language"
+        ]
+        self.assertEqual(len(vague), 1)
+        self.assertEqual(vague[0]["severity"], "high")
+        self.assertFalse(result["qa"]["publishable"])
+        self.assertEqual(result["rules"]["flag_counts"]["vague_language"], 1)
+
+    def test_generate_unknown_profile_is_400(self):
+        status, result = self._post_status(
+            "/api/generate",
+            {"content": sample("csv")["content"], "profile": "nope"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("nope", result["error"])
+
+    def test_generate_layers_profile_and_config(self):
+        content = (
+            "id,type,title,description,benefit,source\n"
+            "A,fix,Better sync,The sync is improved,"
+            "A much better experience,A\n"
+        )
+        status, result = self._post(
+            "/api/generate",
+            {
+                "content": content,
+                "format": "csv",
+                "profile": "strict",
+                "config": {
+                    "extra_vague_terms": ["blazing"],
+                    "severity_overrides": {"missing_source": "low"},
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["profile"], "strict")
+        self.assertIn("blazing", result["config"]["extra_vague_terms"])
+        self.assertIn("breaking", result["config"]["required_sections"])
+        self.assertEqual(
+            result["config"]["severity_overrides"]["vague_language"], "high"
+        )
+        self.assertEqual(
+            result["config"]["severity_overrides"]["missing_source"], "low"
+        )
 
     def test_generate_applies_extra_term_and_severity_override(self):
         content = (
@@ -369,6 +451,29 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 422)
         self.assertIn("error", result)
 
+    def test_diff_echoes_profile_and_rules(self):
+        previous = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Fast and reliable,SRC-A,https://a\n"
+        )
+        current = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Reliable and fast,,\n"
+        )
+        status, result = self._post(
+            "/api/diff",
+            {
+                "previous": previous,
+                "current": current,
+                "format": "csv",
+                "profile": "strict",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["profile"], "strict")
+        self.assertIn("rules", result)
+        self.assertEqual(result["rules"]["severity_overrides"]["vague_language"], "high")
+
     def _get_export(self, path, params):
         query = urllib.parse.urlencode(params)
         return self._get(path + "?" + query)
@@ -471,6 +576,83 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 422)
 
+    VAGUE = (
+        "id,type,title,description,benefit,source\n"
+        "A,fix,Better sync,The sync is improved,"
+        "A much better experience,A\n"
+    )
+    CLEAN = (
+        "id,type,title,description,benefit,source\n"
+        "A,fix,Fix login,Login no longer fails,Reliable access,A\n"
+    )
+
+    def test_export_rules_csv_endpoint(self):
+        status, headers, body = self._get_export_raw(
+            "/api/export/rules.csv", {"content": self.VAGUE, "format": "csv"}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/csv"))
+        self.assertIn("attachment", headers["Content-Disposition"])
+        self.assertIn("qa-rules.csv", headers["Content-Disposition"])
+        rows = list(csv.reader(io.StringIO(body.decode("utf-8"))))
+        self.assertEqual(rows[0], ["code", "severity", "count"])
+        self.assertEqual(rows[1], ["vague_language", "medium", "1"])
+
+    def test_export_rules_csv_header_only_when_nothing_fired(self):
+        status, _headers, body = self._get_export_raw(
+            "/api/export/rules.csv", {"content": self.CLEAN, "format": "csv"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body.decode("utf-8"), "code,severity,count\n")
+
+    def test_export_rules_json_endpoint(self):
+        status, headers, body = self._get_export_raw(
+            "/api/export/rules.json", {"content": self.VAGUE, "format": "csv"}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("application/json"))
+        self.assertIn("attachment", headers["Content-Disposition"])
+        summary = json.loads(body.decode("utf-8"))
+        self.assertIn("effective_vague_terms", summary)
+        self.assertIn("banned_phrases", summary)
+        self.assertIn("required_sections", summary)
+        self.assertIn("severity_overrides", summary)
+        self.assertEqual(summary["flag_counts"]["vague_language"], 1)
+
+    def test_export_rules_applies_profile(self):
+        status, _headers, body = self._get_export_raw(
+            "/api/export/rules.csv",
+            {"content": self.VAGUE, "format": "csv", "profile": "strict"},
+        )
+        self.assertEqual(status, 200)
+        rows = list(csv.reader(io.StringIO(body.decode("utf-8"))))
+        by_code = {row[0]: row for row in rows[1:]}
+        self.assertEqual(
+            by_code["vague_language"], ["vague_language", "high", "1"]
+        )
+
+    def test_export_rules_missing_content_is_400(self):
+        status, _headers, body = self._get_export_raw(
+            "/api/export/rules.csv", {"format": "csv"}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn(b"error", body)
+
+    def test_export_rules_unparseable_is_422(self):
+        status, _headers, _body = self._get_export_raw(
+            "/api/export/rules.json",
+            {"content": "foo,bar\n1,2\n", "format": "csv"},
+        )
+        self.assertEqual(status, 422)
+
+    def test_export_rules_unknown_profile_is_400(self):
+        status, _headers, body = self._get_export_raw(
+            "/api/export/rules.csv",
+            {"content": self.CLEAN, "format": "csv", "profile": "nope"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn(b"nope", body)
+
     def test_export_invalid_format_is_400(self):
         status, _headers, _body = self._get_export_raw(
             "/api/export/qa.csv",
@@ -554,6 +736,36 @@ class ServerHistoryTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 400)
         error = json.loads(ctx.exception.read().decode("utf-8"))
         self.assertIn("error", error)
+
+        with urllib.request.urlopen(
+            self.base + "/api/history", timeout=5
+        ) as resp:
+            after = json.loads(resp.read().decode("utf-8"))["drafts"]
+        self.assertEqual(len(after), len(before))
+
+    def test_unknown_profile_is_not_stored(self):
+        with urllib.request.urlopen(
+            self.base + "/api/history", timeout=5
+        ) as resp:
+            before = json.loads(resp.read().decode("utf-8"))["drafts"]
+
+        request = urllib.request.Request(
+            self.base + "/api/generate",
+            data=json.dumps(
+                {
+                    "content": sample("csv")["content"],
+                    "format": "csv",
+                    "profile": "does-not-exist",
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
+        error = json.loads(ctx.exception.read().decode("utf-8"))
+        self.assertIn("does-not-exist", error["error"])
 
         with urllib.request.urlopen(
             self.base + "/api/history", timeout=5
