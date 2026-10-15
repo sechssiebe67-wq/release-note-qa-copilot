@@ -25,6 +25,7 @@ CHECKLIST_HEADER = ("label", "status", "detail")
 DIFF_HEADER = ("category", "id", "title", "type", "reason")
 RULES_HEADER = ("code", "severity", "count")
 SCORE_HEADER = ("code", "severity", "count", "points")
+LANGUAGE_HEADER = ("code", "severity", "entry_id", "message")
 TEMPLATE_HEADER = ("section", "title", "required", "entry_count")
 TREND_HEADER = (
     "label",
@@ -221,6 +222,44 @@ def score_json(payload: Mapping[str, Any]) -> str:
     score = _as_mapping(_as_mapping(payload).get("score"))
     return json.dumps(
         score,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
+def language_csv(payload: Mapping[str, Any]) -> str:
+    """Return one CSV row per language finding.
+
+    Header: ``code,severity,entry_id,message`` — the same shape as the
+    ``findings`` list built by
+    :func:`releasenote.language.compute_language`. A payload without a
+    ``language`` mapping (or without findings) yields just the header row.
+    """
+    language = _as_mapping(_as_mapping(payload).get("language"))
+    rows = []
+    for item in _as_list(language.get("findings")):
+        finding = _as_mapping(item)
+        rows.append(
+            (
+                finding.get("code", ""),
+                finding.get("severity", ""),
+                finding.get("entry_id", ""),
+                finding.get("message", ""),
+            )
+        )
+    return _render_csv(LANGUAGE_HEADER, rows)
+
+
+def language_json(payload: Mapping[str, Any]) -> str:
+    """Serialise the full ``language`` object as stable, UTF-8 JSON.
+
+    The result has sorted keys, contains no ``NaN`` and is identical to the
+    payload's ``language`` object, so it round-trips through standard parsers.
+    """
+    language = _as_mapping(_as_mapping(payload).get("language"))
+    return json.dumps(
+        language,
         ensure_ascii=False,
         sort_keys=True,
         allow_nan=False,
@@ -551,6 +590,7 @@ __all__ = [
     "DIFF_HEADER",
     "RULES_HEADER",
     "SCORE_HEADER",
+    "LANGUAGE_HEADER",
     "TEMPLATE_HEADER",
     "TREND_HEADER",
     "COMPARISON_HEADER",
@@ -567,6 +607,8 @@ __all__ = [
     "rules_json",
     "score_csv",
     "score_json",
+    "language_csv",
+    "language_json",
     "template_csv",
     "template_json",
     "trend_csv",

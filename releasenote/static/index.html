@@ -150,6 +150,7 @@
         <button id="generate">Generate draft</button>
         <button id="loadCsv" class="secondary">Load CSV sample</button>
         <button id="loadJson" class="secondary">Load JSON sample</button>
+        <button id="loadLanguageSample" class="secondary" type="button">Load language sample</button>
       </div>
 
       <details id="rulesPanel">
@@ -258,6 +259,18 @@
     <section style="grid-column: 1 / -1;">
       <label>Release diff</label>
       <div id="diff" class="muted">Run a diff to compare the current draft with the previous release.</div>
+    </section>
+
+    <section style="grid-column: 1 / -1;" id="languageSection" hidden>
+      <label>Language</label>
+      <p class="muted">Readability and voice checks over the draft (titles + descriptions + benefits). Findings honour workspace severity overrides.</p>
+      <div class="summary" id="languageSummary"></div>
+      <div class="summary" id="languageReadability"></div>
+      <div id="languageFindings" class="muted"></div>
+      <div class="row" style="margin-top:.6rem" id="languageExports">
+        <button id="downloadLanguageCsv" class="secondary" type="button">Download language CSV</button>
+        <button id="downloadLanguageJson" class="secondary" type="button">Download language JSON</button>
+      </div>
     </section>
 
     <section style="grid-column: 1 / -1;" id="trendSection">
@@ -697,6 +710,7 @@
         '<span class="pill">' + esc(counts.total) + ' flags</span>';
 
       renderScore(result);
+      renderLanguage(result.language);
       $("configSummary").innerHTML = renderConfig(result.config);
       $("rulesSummary").innerHTML = renderRules(result.rules);
 
@@ -847,9 +861,12 @@
       if (typeof value === "boolean") return value ? "true" : "false";
       if (typeof value === "number") {
         if (!isFinite(value)) throw new Error("non-finite number");
-        // sourced_ratio and score penalty points are the only float fields;
-        // Python renders integral floats as "1.0" rather than "1".
-        return (key === "sourced_ratio" || key === "points")
+        // sourced_ratio, score penalty points and the language readability
+        // metrics are the only float fields; Python renders integral floats as
+        // "1.0" rather than "1".
+        return (key === "sourced_ratio" || key === "points" ||
+                key === "flesch_reading_ease" || key === "avg_sentence_length" ||
+                key === "avg_syllables_per_word" || key === "long_sentence_ratio")
           ? pyFloat(value) : String(value);
       }
       if (typeof value === "string") return JSON.stringify(value);
@@ -983,6 +1000,79 @@
       if (!lastResult || !lastResult.score) return;
       saveBlob("release-score.json",
         buildScoreJson(lastResult.score), "application/json");
+    }
+
+    function languageGradeClass(grade) {
+      if (grade === "clear") return "pass";
+      if (grade === "acceptable") return "medium";
+      return "high";
+    }
+
+    function buildLanguageCsv(language) {
+      const header = ["code", "severity", "entry_id", "message"];
+      const rows = ((language && language.findings) || []).map(f =>
+        [f.code, f.severity, f.entry_id, f.message]);
+      return buildCsv(header, rows);
+    }
+
+    function buildLanguageJson(language) {
+      return stableJson(language || {}, null);
+    }
+
+    function renderLanguage(language) {
+      if (!language) { $("languageSection").hidden = true; return; }
+      const summary = language.summary || {};
+      const counts = summary.counts || {};
+      const grade = summary.grade || "";
+      $("languageSummary").innerHTML =
+        '<span class="pill ' + languageGradeClass(grade) + '">grade: ' + esc(grade) + '</span>' +
+        '<span class="pill high">' + esc(counts.high || 0) + ' high</span>' +
+        '<span class="pill medium">' + esc(counts.medium || 0) + ' medium</span>' +
+        '<span class="pill">' + esc(counts.low || 0) + ' low</span>' +
+        '<span class="pill">' + esc(counts.total || 0) + ' findings</span>';
+      const readability = language.readability || {};
+      $("languageReadability").innerHTML =
+        '<span class="pill">Flesch: ' + esc(readability.flesch_reading_ease) + '</span>' +
+        '<span class="pill">avg sentence: ' + esc(readability.avg_sentence_length) + ' words</span>' +
+        '<span class="pill">syllables/word: ' + esc(readability.avg_syllables_per_word) + '</span>' +
+        '<span class="pill">long sentences: ' + esc(Math.round((readability.long_sentence_ratio || 0) * 100) + '%') + '</span>';
+      const findings = language.findings || [];
+      $("languageFindings").innerHTML = findings.length
+        ? '<table class="trend"><thead><tr><th>Code</th><th>Severity</th>' +
+          '<th>Entry</th><th>Message</th></tr></thead><tbody>' +
+          findings.map(f =>
+            '<tr><td>' + esc(f.code) + '</td>' +
+            '<td><span class="pill ' + esc(f.severity) + '">' + esc(f.severity) + '</span></td>' +
+            '<td><code>' + esc(f.entry_id || "—") + '</code></td>' +
+            '<td>' + esc(f.message) + '</td></tr>'
+          ).join("") + '</tbody></table>'
+        : '<div class="muted">No language findings — clear writing.</div>';
+      $("languageSection").hidden = false;
+    }
+
+    function downloadLanguageCsv() {
+      if (!lastResult || !lastResult.language) return;
+      saveBlob("release-language.csv",
+        buildLanguageCsv(lastResult.language), "text/csv");
+    }
+
+    function downloadLanguageJson() {
+      if (!lastResult || !lastResult.language) return;
+      saveBlob("release-language.json",
+        buildLanguageJson(lastResult.language), "application/json");
+    }
+
+    async function loadLanguageSample() {
+      try {
+        const data = await api("/api/language/sample");
+        $("format").value = data.format || "csv";
+        $("content").value = data.content || "";
+        if (data.title) $("title").value = data.title;
+        $("status").textContent = "Language sample loaded.";
+        await generate();
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      }
     }
 
     function parseTrendInput(text) {
@@ -1766,6 +1856,7 @@
     $("runDiff").addEventListener("click", runDiff);
     $("loadCsv").addEventListener("click", () => loadSample("csv"));
     $("loadJson").addEventListener("click", () => loadSample("json"));
+    $("loadLanguageSample").addEventListener("click", loadLanguageSample);
     $("loadRules").addEventListener("click", loadRules);
     $("download").addEventListener("click", download);
     $("downloadQaCsv").addEventListener("click", downloadQaCsv);
@@ -1778,6 +1869,8 @@
     $("downloadTemplateJson").addEventListener("click", downloadTemplateJson);
     $("downloadScoreCsv").addEventListener("click", downloadScoreCsv);
     $("downloadScoreJson").addEventListener("click", downloadScoreJson);
+    $("downloadLanguageCsv").addEventListener("click", downloadLanguageCsv);
+    $("downloadLanguageJson").addEventListener("click", downloadLanguageJson);
     $("analyzeTrend").addEventListener("click", analyzeTrend);
     $("loadTrendSample").addEventListener("click", loadTrendSample);
     $("downloadTrendCsv").addEventListener("click", downloadTrendCsv);

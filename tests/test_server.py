@@ -80,10 +80,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["format"], "json")
 
-    def test_version_is_0_14_0(self):
+    def test_version_is_0_15_0(self):
         status, body = self._get("/api/version")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["version"], "0.14.0")
+        self.assertEqual(json.loads(body)["version"], "0.15.0")
 
     def test_config_sample_endpoint(self):
         status, body = self._get("/api/config/sample")
@@ -596,7 +596,10 @@ class ServerTests(unittest.TestCase):
         self.assertIn("qa-rules.csv", headers["Content-Disposition"])
         rows = list(csv.reader(io.StringIO(body.decode("utf-8"))))
         self.assertEqual(rows[0], ["code", "severity", "count"])
-        self.assertEqual(rows[1], ["vague_language", "medium", "1"])
+        # The vague sample also uses passive voice ("is improved"), so the
+        # language lint contributes a low-severity code alongside vague_language.
+        self.assertEqual(rows[1], ["passive_voice", "low", "1"])
+        self.assertEqual(rows[2], ["vague_language", "medium", "1"])
 
     def test_export_rules_csv_header_only_when_nothing_fired(self):
         status, _headers, body = self._get_export_raw(

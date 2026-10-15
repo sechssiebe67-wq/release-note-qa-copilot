@@ -156,11 +156,18 @@ class WorkspaceConfigServiceTests(unittest.TestCase):
 
     def test_no_config_regression_flag_set_unchanged(self):
         # Snapshot of the built-in heuristics output for the CSV sample. If this
-        # changes, the default QA behaviour changed and needs review.
+        # changes, the default QA behaviour changed and needs review. The CSV
+        # sample contains two passive-voice descriptions ("are removed", "is
+        # improved"), so the language lint contributes two low-severity flags.
         result = build_draft(sample("csv")["content"], "csv")
         codes = sorted(f["code"] for f in result["qa"]["flags"])
-        self.assertEqual(codes, ["vague_language", "vague_language"])
+        self.assertEqual(
+            codes,
+            ["passive_voice", "passive_voice", "vague_language", "vague_language"],
+        )
         self.assertTrue(result["qa"]["publishable"])
+        self.assertIn("language", result)
+        self.assertEqual(result["language"]["summary"]["counts"]["total"], 2)
 
     def test_sample_workspace_config_is_valid(self):
         payload = sample_workspace_config()

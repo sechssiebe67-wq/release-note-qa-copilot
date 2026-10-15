@@ -121,7 +121,9 @@ class ComputeTrendTests(unittest.TestCase):
         self.assertEqual(delta["to"], "r2")
         self.assertEqual(delta["high"], -2)
         self.assertEqual(delta["medium"], -2)
-        self.assertEqual(delta["total"], -4)
+        # BAD also carries a low-severity passive-voice finding ("is improved"),
+        # so its total is 5 and the delta to the clean release is -5.
+        self.assertEqual(delta["total"], -5)
         self.assertEqual(delta["sourced_ratio"], 1.0)
 
 
@@ -309,7 +311,8 @@ class TrendExportTests(unittest.TestCase):
         self.assertEqual(len(rows), 4)
         self.assertEqual(rows[1][0], "r1")
         self.assertEqual(rows[1][2], "2")
-        self.assertEqual(rows[1][5], "4")
+        # 2 high + 2 medium + 1 low passive-voice language finding.
+        self.assertEqual(rows[1][5], "5")
 
     def test_csv_is_stable(self):
         report = self._report()

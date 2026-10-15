@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 
 from .config import WorkspaceConfig
 from .grouping import group_entries
+from .language import language_flags
 from .templates import ReleaseTemplate
 from .models import (
     SEVERITY_HIGH,
@@ -246,6 +247,11 @@ def analyze_entries(
     result = QAResult()
     for entry in entries:
         result.flags.extend(analyze_entry(entry, config))
+
+    # Fold in the deterministic language-lint findings (readability/style).
+    # They reuse the Flag shape and honour ``severity_overrides`` so they merge
+    # seamlessly with the traceability and hype rules above.
+    result.flags.extend(language_flags(entries, template, config))
 
     if config.required_sections:
         groups = group_entries(entries)

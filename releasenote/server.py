@@ -25,6 +25,8 @@ from .exporters import (
     comparison_matrix_csv,
     diff_csv,
     draft_json,
+    language_csv,
+    language_json,
     profile_comparison_csv,
     profile_comparison_json,
     qa_flags_csv,
@@ -72,6 +74,7 @@ from .service import (
     sample,
     sample_archive,
     sample_comparison,
+    sample_language,
     sample_profile_comparison,
     sample_trend,
     sample_workspace_config,
@@ -102,6 +105,11 @@ _EXPORTS = {
         "application/json; charset=utf-8",
         "release-score.json",
     ),
+    "/api/export/language.csv": ("text/csv", "release-language.csv"),
+    "/api/export/language.json": (
+        "application/json; charset=utf-8",
+        "release-language.json",
+    ),
     "/api/export/draft.json": ("application/json; charset=utf-8", "release-draft.json"),
 }
 
@@ -111,6 +119,8 @@ _TEMPLATE_EXPORTS = ("/api/export/template.csv", "/api/export/template.json")
 _DIFFABLE_EXPORTS = _TEMPLATE_EXPORTS + (
     "/api/export/score.csv",
     "/api/export/score.json",
+    "/api/export/language.csv",
+    "/api/export/language.json",
 )
 
 # Trend exports built from repeated ``release=label:content`` query params.
@@ -397,6 +407,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/archive/sample":
             self._send_json(200, sample_archive())
+            return
+        if path == "/api/language/sample":
+            self._send_json(200, sample_language())
             return
         if path == "/api/archive":
             self._handle_archive(parsed)
@@ -913,6 +926,10 @@ class Handler(BaseHTTPRequestHandler):
                     body = score_csv(result)
                 elif path == "/api/export/score.json":
                     body = score_json(result)
+                elif path == "/api/export/language.csv":
+                    body = language_csv(result)
+                elif path == "/api/export/language.json":
+                    body = language_json(result)
                 elif path.endswith(".csv"):
                     body = template_csv(result)
                 else:

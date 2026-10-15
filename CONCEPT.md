@@ -51,7 +51,8 @@ The MVP is a dependency-free Python web application:
 | Release readiness score | A single, explainable 0–100 score per draft with a `ready`/`review`/`risky` band and an optional gate policy (`min_score`, `max_high`) that yields a deterministic `pass`/`fail` ship decision; export as CSV/JSON |
 | Draft archive | Search and filter stored drafts (`q` on draft/entry titles, `tag`, `status`, `band`, `since`/`until`, `limit`/`offset`) and organise them with free-form tags kept in an append-only `archive.jsonl` log (latest action per draft/tag wins); per-draft tag audit trail and CSV/JSON export; requires `DATA_DIR` |
 | Draft versioning | Immutable, ordered versions per logical draft (`draft_key`): regenerating with the same key appends versions `1`, `2`, … to an append-only `versions.jsonl` log; list versions, diff two versions (reusing the diff machinery) and roll back to any version with `rolled_back_from`; CSV/JSON export; requires `DATA_DIR` |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/archive/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/export/archive.csv`, `GET /api/export/archive.json`, `GET /api/export/versions.csv`, `GET /api/export/versions.json`, `GET /api/export/version-diff.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/archive/<id>`, `GET /api/versions/<draft_key>`, `GET /api/versions/<draft_key>/<version>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles`, `POST /api/archive/tag`, `POST /api/versions/diff`, `POST /api/versions/rollback` |
+| Language lint | Deterministic, offline readability + style scoring per draft: Flesch reading ease, sentence length, syllables and long-sentence ratio plus passive voice, first-person, ALL-CAPS, emoji, jargon, mixed tense and duplicate-heading findings folded into the QA flags and the release readiness score; CSV/JSON export |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/archive/sample`, `GET /api/language/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/export/language.csv`, `GET /api/export/language.json`, `GET /api/export/archive.csv`, `GET /api/export/archive.json`, `GET /api/export/versions.csv`, `GET /api/export/versions.json`, `GET /api/export/version-diff.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/archive/<id>`, `GET /api/versions/<draft_key>`, `GET /api/versions/<draft_key>/<version>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles`, `POST /api/archive/tag`, `POST /api/versions/diff`, `POST /api/versions/rollback` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
@@ -60,8 +61,12 @@ a profile pre-fills the *Workspace rules* panel. After a successful generate it
 also shows the release readiness score with a band badge, the top penalties and
 the gate status, and offers *Download QA CSV*, *Download checklist CSV*,
 *Download JSON*, *Download rules CSV*, *Download rules JSON*, *Download template
-CSV*, *Download template JSON*, *Download score CSV* and *Download score JSON*;
-after a diff it adds *Download diff CSV*. A
+CSV*, *Download template JSON*, *Download score CSV*, *Download score JSON*,
+*Download language CSV* and *Download language JSON*; after a diff it adds
+*Download diff CSV*. A *Language* panel (shown after a successful generate)
+renders the readability numbers, a grade badge and the findings table, and a
+*Load language sample* button pre-fills a lint-rich example from
+`GET /api/language/sample`. A
 *Release-note template* selector is populated from `GET /api/templates` and is
 sent on generate and diff. Those downloads are built in the browser from the
 payload already on screen, so they need no extra server round-trip. When a draft has a `draft_id`
@@ -98,20 +103,21 @@ releasenote/
   templates.py  named release-note templates: section order, intro/outro, required sections
   importer.py   CSV/JSON parsing + header aliasing
   grouping.py   bucketing by change type
-  qa.py         heuristic QA rules, workspace overrides, template sections and checklist
+  language.py   deterministic offline readability + style lint (pure, dependency free)
+  qa.py         heuristic QA rules, language findings, workspace overrides, template sections and checklist
   diff.py       compare two drafts: classification, repeated claims, regressions
   trend.py      multi-release trend analysis: metrics, deltas, verdicts
   compare.py    draft comparison matrix: metrics, presence, shared/unique, recommendation
   profile_compare.py  one changelog across rule profiles: metrics, delta, recommendation
-  score.py      deterministic release readiness score, band and gate policy evaluation
+  score.py      deterministic release readiness score, band, bounded language penalty and gate policy evaluation
   archive.py    pure tag validation + archive listing filter/pagination
   versioning.py pure draft-key validation + version numbering, ordering, diff and rollback
   generator.py  Markdown rendering with inline QA annotations and a template layout
-  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, score, template, trend, comparison, profile comparison, archive, versions and full payload
+  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, score, language, template, trend, comparison, profile comparison, archive, versions and full payload
   service.py    parse -> group -> qa -> score -> render pipeline (+ build_diff, build_trend, build_comparison, build_profile_comparison, build_archive, tag_draft, reviews, shared drafts, draft versioning)
   storage.py    optional append-only draft history + review/audit store + archive tag log + version log
   server.py     stdlib HTTP server + JSON API + read-only share pages
-  static/       single-page browser UI (draft, diff, review controls, archive, versions, share link)
+  static/       single-page browser UI (draft, diff, language panel, review controls, archive, versions, share link)
 tests/          offline unit tests (no network)
 Dockerfile      non-root, read-only-friendly image
 deploy/helm/    one chart exposing image digest, ingress, probes, PVC
@@ -160,6 +166,12 @@ compared with a previous release:
   contains a vague term.
 - **repeated_claim** (medium): identical normalized benefit text is reused, or
   an entry's title and description are unchanged from the previous release.
+
+The language lint (see [Language lint](#language-lint)) adds eight more
+deterministic codes — `long_sentence` (medium), `passive_voice` (low),
+`first_person` (low), `all_caps` (low), `emoji_in_release_note` (low),
+`jargon` (medium), `tense_inconsistency` (low) and `duplicate_heading`
+(medium) — and merges them into the same `qa.flags` list.
 
 A draft is **publishable** once no high-severity flag remains. Any flag code can
 be re-ranked to `high`/`medium`/`low` through `severity_overrides`.
@@ -679,6 +691,107 @@ screen. The feature ships in **v0.12.0** (Python package and Helm chart). No new
 third-party dependency is introduced; the standard library is still the only
 requirement.
 
+## Language lint
+
+**Goal.** Reviewers already get heuristics for traceability and hype, but
+nothing about whether the draft is *readable* and *consistent in voice*. The
+**language lint** scores each draft on readability and style, surfaces concrete
+findings (long sentences, passive voice, first-person slips, ALL-CAPS, emoji,
+jargon, mixed tense, duplicate headings) and folds the result into the QA flags,
+the release readiness score, the exporters and the UI, so a reviewer can act on
+the writing itself in the same pass — all deterministic and offline.
+
+**Intended users.** The same audience as the rest of the product — product and
+release managers, support and marketing reviewers, and the developers who wrote
+the changes — but with a focus on the *editorial* pass before publishing.
+
+**Current capabilities.** `releasenote.language.compute_language(entries,
+template=None, config=None)` is a pure, dependency-free function returning a
+JSON-serialisable mapping:
+
+```json
+{
+  "readability": {
+    "flesch_reading_ease": 83.32,
+    "avg_sentence_length": 5.0,
+    "avg_syllables_per_word": 1.4,
+    "long_sentence_ratio": 0.0
+  },
+  "style": {
+    "passive_voice_hits": 1,
+    "first_person_hits": 1,
+    "all_caps_hits": 0,
+    "emoji_hits": 0,
+    "jargon_hits": 0,
+    "tense_mix": 0
+  },
+  "findings": [
+    {"code": "passive_voice", "severity": "low", "entry_id": "A",
+     "message": "Passive voice: are excited."},
+    {"code": "first_person", "severity": "low", "entry_id": "A",
+     "message": "First-person wording: we."}
+  ],
+  "summary": {"grade": "acceptable", "counts": {"high": 0, "medium": 0, "low": 2, "total": 2}}
+}
+```
+
+The readability metrics are computed over entry titles + descriptions +
+benefits. Syllables use a deterministic vowel-group heuristic with a
+silent-`e` correction, sentences use a fixed splitter, and the style checks use
+fixed passive/jargon/tense-marker lists — no network, external packages or
+randomness. Findings reuse the `Flag` shape, so `severity_overrides` applies to
+every code, and `summary.grade` is `clear` (no findings), `acceptable` (up to
+three) or `dense` (more).
+
+**Flag codes.**
+
+| Code | Severity | Meaning |
+| --- | --- | --- |
+| `long_sentence` | medium | A sentence of 40 or more words. |
+| `passive_voice` | low | A form of "to be"/"get" plus a past participle. |
+| `first_person` | low | First-person wording such as "we", "our" or "I". |
+| `all_caps` | low | An ALL-CAPS word of four or more letters (common acronyms ignored). |
+| `emoji_in_release_note` | low | Emoji characters in the draft. |
+| `jargon` | medium | A term from the fixed jargon list (for example "leverage"). |
+| `tense_inconsistency` | low | Benefits mix past and present tense. |
+| `duplicate_heading` | medium | Two entries share the same heading/title. |
+
+**Pipeline.** `releasenote.qa.analyze_entries` merges the language findings into
+the QA result, so `build_draft` (and `build_diff`) and every re-analysis
+(trend, comparison, share links, archive) see them exactly like any other flag.
+The draft payload gains a top-level `language` key with the full report.
+
+**Score.** `releasenote.score.compute_score` folds the language findings into a
+single **bounded** penalty: `LANGUAGE_PENALTY_PER_FINDING` (2) points per
+finding, capped at `LANGUAGE_PENALTY_MAX` (20), reported as one `language`
+`penalties` row alongside the per-code penalties. Adding or removing language
+findings therefore moves `score` and the `band` (and any `min_score` gate)
+consistently, while the deduction stays explainable. A blank entry list yields
+zero findings and no penalty.
+
+**Exports and endpoints.**
+
+| Endpoint | Body / query | Response |
+| --- | --- | --- |
+| `GET /api/export/language.csv` | `format`, `title`, `content` (or `previous`/`current`), `profile`, `template` | `text/csv` with the header `code,severity,entry_id,message`, one row per finding. |
+| `GET /api/export/language.json` | same as `language.csv` | The full `language` object as stable UTF-8 JSON (sorted keys, no `NaN`). |
+| `GET /api/language/sample` | — | A lint-rich input payload that is valid for `POST /api/generate`. |
+
+The exports answer with a `Content-Disposition: attachment` header and reuse the
+existing 400/413/422 error behaviour: a missing `content` is HTTP 400, an
+oversized body HTTP 413 and unparseable content HTTP 422.
+
+**Browser UI.** After a successful generate the UI renders a *Language* panel
+with the readability numbers, a grade badge, the findings table and *Download
+language CSV* / *Download language JSON* buttons built in the browser from the
+payload already on screen. The feature ships in **v0.15.0** (Python package and
+Helm chart). No new third-party dependency is introduced; the standard library
+is still the only requirement.
+
+**Next direction.** Language-aware workspace rules (custom jargon lists and
+readability thresholds per workspace), a readability trend across releases and
+per-audience tone targets, all building on the deterministic offline scorer.
+
 ## Release-note templates
 
 **Goal.** The Copilot has always rendered a **fixed** Markdown skeleton: a
@@ -1001,6 +1114,9 @@ building on the immutable log without a database.
 - Per-version review status, named/annotated versions and version-aware share
   links — immutable draft versioning with list/diff/rollback landed in
   **v0.14.0**; per-version review state is still open.
+- Language-aware workspace rules (custom jargon lists, readability thresholds)
+  and a readability trend across releases — the offline language lint landed in
+  **v0.15.0**; custom lists and trend are still open.
 
 Per-workspace term and tone rules (was the first item in this list) landed in
 **v0.2.0** — see [Workspace configuration](#workspace-configuration).
@@ -1033,6 +1149,9 @@ The draft archive with search, filters and an append-only tag log landed in
 **v0.13.0** — see [Draft archive](#draft-archive).
 Immutable draft versioning with list/diff/rollback and CSV/JSON export landed in
 **v0.14.0** — see [Draft versioning](#draft-versioning).
+The deterministic offline language lint with readability/style findings, a
+bounded score penalty and CSV/JSON export landed in **v0.15.0** — see
+[Language lint](#language-lint).
 
 ## Success signals
 
