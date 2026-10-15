@@ -1,15 +1,18 @@
+import csv
+import io
 import json
 import os
 import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from unittest import mock
 
 from releasenote.config import WorkspaceConfig
 from releasenote.server import create_server
-from releasenote.service import sample
+from releasenote.service import build_draft, sample
 
 
 class ServerTests(unittest.TestCase):
@@ -77,10 +80,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["format"], "json")
 
-    def test_version_is_0_3_0(self):
+    def test_version_is_0_4_0(self):
         status, body = self._get("/api/version")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["version"], "0.3.0")
+        self.assertEqual(json.loads(body)["version"], "0.4.0")
 
     def test_config_sample_endpoint(self):
         status, body = self._get("/api/config/sample")
@@ -365,6 +368,115 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 422)
         self.assertIn("error", result)
+
+    def _get_export(self, path, params):
+        query = urllib.parse.urlencode(params)
+        return self._get(path + "?" + query)
+
+    def _get_export_raw(self, path, params):
+        query = urllib.parse.urlencode(params)
+        try:
+            with urllib.request.urlopen(
+                self.base + path + "?" + query, timeout=5
+            ) as resp:
+                return resp.status, resp.headers, resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers, exc.read()
+
+    def test_export_qa_csv_endpoint(self):
+        content = sample("csv")["content"]
+        query = urllib.parse.urlencode({"content": content, "format": "csv"})
+        with urllib.request.urlopen(
+            self.base + "/api/export/qa.csv?" + query, timeout=5
+        ) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertTrue(resp.headers["Content-Type"].startswith("text/csv"))
+            self.assertIn("attachment", resp.headers["Content-Disposition"])
+            body = resp.read().decode("utf-8")
+        self.assertEqual(body.splitlines()[0], "entry_id,code,severity,message")
+
+    def test_export_checklist_csv_endpoint(self):
+        content = sample("csv")["content"]
+        status, headers, body = self._get_export_raw(
+            "/api/export/checklist.csv", {"content": content, "format": "csv"}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/csv"))
+        self.assertEqual(body.decode("utf-8").splitlines()[0], "label,status,detail")
+
+    def test_export_draft_json_endpoint_matches_build_draft(self):
+        content = sample("csv")["content"]
+        status, headers, body = self._get_export_raw(
+            "/api/export/draft.json", {"content": content, "format": "csv"}
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("attachment", headers["Content-Disposition"])
+        exported = json.loads(body.decode("utf-8"))
+        expected = build_draft(content, "csv")
+        self.assertEqual(exported["qa"], expected["qa"])
+        self.assertEqual(exported["checklist"], expected["checklist"])
+        self.assertEqual(exported["entries"], expected["entries"])
+
+    def test_export_diff_csv_endpoint(self):
+        previous = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Fast and reliable,SRC-A,https://a\n"
+        )
+        current = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Reliable and fast,,\n"
+            "B,fix,Beta,Beta description,Gamma value,SRC-B,\n"
+        )
+        query = urllib.parse.urlencode(
+            {"previous": previous, "current": current, "format": "csv"}
+        )
+        with urllib.request.urlopen(
+            self.base + "/api/export/diff.csv?" + query, timeout=5
+        ) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertTrue(resp.headers["Content-Type"].startswith("text/csv"))
+            body = resp.read().decode("utf-8")
+        rows = list(csv.reader(io.StringIO(body)))
+        self.assertEqual(rows[0], ["category", "id", "title", "type", "reason"])
+        self.assertGreater(len(rows), 1)
+
+    def test_export_diff_csv_requires_previous_and_current(self):
+        status, _headers, body = self._get_export_raw("/api/export/diff.csv", {})
+        self.assertEqual(status, 400)
+        self.assertIn(b"error", body)
+
+        status, _headers, body = self._get_export_raw(
+            "/api/export/diff.csv", {"current": sample("csv")["content"]}
+        )
+        self.assertEqual(status, 400)
+
+    def test_export_diff_csv_unparseable_is_422(self):
+        status, _headers, body = self._get_export_raw(
+            "/api/export/diff.csv",
+            {"previous": "foo,bar\n1,2\n", "current": "foo,bar\n1,2\n", "format": "csv"},
+        )
+        self.assertEqual(status, 422)
+        self.assertIn(b"error", body)
+
+    def test_export_qa_csv_missing_content_is_400(self):
+        status, _headers, body = self._get_export_raw(
+            "/api/export/qa.csv", {"format": "csv"}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn(b"error", body)
+
+    def test_export_qa_csv_unparseable_is_422(self):
+        status, _headers, _body = self._get_export_raw(
+            "/api/export/qa.csv", {"content": "foo,bar\n1,2\n", "format": "csv"}
+        )
+        self.assertEqual(status, 422)
+
+    def test_export_invalid_format_is_400(self):
+        status, _headers, _body = self._get_export_raw(
+            "/api/export/qa.csv",
+            {"content": sample("csv")["content"], "format": "xml"},
+        )
+        self.assertEqual(status, 400)
 
     def test_unknown_path_404(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:

@@ -236,6 +236,12 @@
         <div><label>Markdown draft</label></div>
         <button id="download" class="secondary" style="flex:0; min-width:auto;">Download .md</button>
       </div>
+      <div class="row" style="margin-top:.4rem" id="exports" hidden>
+        <button id="downloadQaCsv" class="secondary" type="button">Download QA CSV</button>
+        <button id="downloadChecklistCsv" class="secondary" type="button">Download checklist CSV</button>
+        <button id="downloadJson" class="secondary" type="button">Download JSON</button>
+        <button id="downloadDiffCsv" class="secondary" type="button" hidden>Download diff CSV</button>
+      </div>
       <pre id="markdown" aria-live="polite"></pre>
     </section>
 
@@ -251,6 +257,7 @@
     const ESCAPE_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
     const esc = (value) => String(value).replace(/[&<>"']/g, (c) => ESCAPE_MAP[c]);
     let lastMarkdown = "";
+    let lastResult = null;
 
     async function api(path, options) {
       const res = await fetch(path, options);
@@ -399,6 +406,10 @@
 
       lastMarkdown = result.markdown;
       $("markdown").textContent = result.markdown;
+
+      lastResult = result;
+      $("exports").hidden = false;
+      $("downloadDiffCsv").hidden = !result.diff;
     }
 
     async function generate() {
@@ -463,6 +474,64 @@
       }
     }
 
+    function csvCell(value) {
+      const text = value === null || value === undefined ? "" : String(value);
+      // Quote fields containing commas, quotes or newlines (RFC 4180).
+      return /[",\n\r]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+    }
+
+    function buildCsv(header, rows) {
+      return [header].concat(rows)
+        .map(row => row.map(csvCell).join(","))
+        .join("\n") + "\n";
+    }
+
+    function saveBlob(name, text, type) {
+      const blob = new Blob([text], { type: type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function downloadQaCsv() {
+      if (!lastResult) return;
+      const rows = (lastResult.qa.flags || []).map(f =>
+        [f.entry_id, f.code, f.severity, f.message]
+      );
+      saveBlob("qa-flags.csv",
+        buildCsv(["entry_id", "code", "severity", "message"], rows), "text/csv");
+    }
+
+    function downloadChecklistCsv() {
+      if (!lastResult) return;
+      const rows = (lastResult.checklist || []).map(item =>
+        [item.label, item.status, item.detail]
+      );
+      saveBlob("qa-checklist.csv",
+        buildCsv(["label", "status", "detail"], rows), "text/csv");
+    }
+
+    function downloadDiffCsv() {
+      if (!lastResult || !lastResult.diff) return;
+      const categories = ["added", "changed", "removed", "unchanged", "repeated_claims", "regressions"];
+      const rows = [];
+      categories.forEach(category => {
+        (lastResult.diff[category] || []).forEach(item => {
+          rows.push([category, item.id, item.title, item.type, item.reason]);
+        });
+      });
+      saveBlob("release-diff.csv",
+        buildCsv(["category", "id", "title", "type", "reason"], rows), "text/csv");
+    }
+
+    function downloadJson() {
+      if (!lastResult) return;
+      saveBlob("release-draft.json", JSON.stringify(lastResult, null, 2), "application/json");
+    }
+
     function download() {
       if (!lastMarkdown) { $("status").textContent = "Generate a draft first."; return; }
       const blob = new Blob([lastMarkdown], { type: "text/markdown" });
@@ -494,6 +563,10 @@
     $("loadJson").addEventListener("click", () => loadSample("json"));
     $("loadRules").addEventListener("click", loadRules);
     $("download").addEventListener("click", download);
+    $("downloadQaCsv").addEventListener("click", downloadQaCsv);
+    $("downloadChecklistCsv").addEventListener("click", downloadChecklistCsv);
+    $("downloadDiffCsv").addEventListener("click", downloadDiffCsv);
+    $("downloadJson").addEventListener("click", downloadJson);
     loadSample("csv");
     loadHistory();
   </script>

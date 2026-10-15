@@ -12,6 +12,7 @@ from .grouping import group_entries
 from .qa import analyze_entries, analyze_entry
 from .generator import render_markdown, render_qa_checklist
 from .diff import diff_drafts, compute_diff
+from .exporters import checklist_csv, diff_csv, draft_json, qa_flags_csv
 
 __all__ = [
     "ChangeEntry",
@@ -31,6 +32,10 @@ __all__ = [
     "render_qa_checklist",
     "diff_drafts",
     "compute_diff",
+    "qa_flags_csv",
+    "checklist_csv",
+    "diff_csv",
+    "draft_json",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
