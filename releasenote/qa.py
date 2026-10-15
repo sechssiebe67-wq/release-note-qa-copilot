@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 
 from .config import WorkspaceConfig
 from .grouping import group_entries
+from .templates import ReleaseTemplate
 from .models import (
     SEVERITY_HIGH,
     SEVERITY_LOW,
@@ -231,12 +232,15 @@ def analyze_entry(
 
 
 def analyze_entries(
-    entries: List[ChangeEntry], config: Optional[WorkspaceConfig] = None
+    entries: List[ChangeEntry],
+    config: Optional[WorkspaceConfig] = None,
+    template: Optional[ReleaseTemplate] = None,
 ) -> QAResult:
     """Return QA flags for a whole set of entries.
 
     Applies the per-entry rules plus draft-level checks (configured required
-    sections). With no ``config`` the built-in rules are unchanged.
+    sections and any required template sections). With no ``config`` the
+    built-in rules are unchanged; with no ``template`` no template flag fires.
     """
     config = config or WorkspaceConfig.default()
     result = QAResult()
@@ -255,6 +259,26 @@ def analyze_entries(
                             message=(
                                 "Required section '{}' has no entries.".format(
                                     section
+                                )
+                            ),
+                            entry_id="",
+                        ),
+                        config,
+                    )
+                )
+
+    if template is not None and template.sections:
+        groups = group_entries(entries)
+        for section in template.sections:
+            if section.required and not groups.get(section.key):
+                result.flags.append(
+                    _with_override(
+                        Flag(
+                            code="missing_template_section",
+                            severity=SEVERITY_MEDIUM,
+                            message=(
+                                "Required template section '{}' is empty.".format(
+                                    section.key
                                 )
                             ),
                             entry_id="",

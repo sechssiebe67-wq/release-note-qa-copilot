@@ -44,18 +44,21 @@ The MVP is a dependency-free Python web application:
 | Review workflow | Mark a draft `pending` / `approved` / `rejected` with reviewer + comment; every transition appended to an append-only audit log; in-memory fallback when `DATA_DIR` is unset |
 | Workspace rules | Per-workspace JSON config: extra/allowed vague terms, banned phrases, required sections, severity overrides |
 | QA rule profiles | Named, reusable rule sets (`strict`, `marketing-safe`, `internal`) that bundle a `WorkspaceConfig` with a description; attach a profile to a draft and get an effective-rule summary |
+| Release-note templates | Named built-in (`default`, `github-release`, `email`) or inline templates control section order, an optional intro/outro and required sections; the resolved template is echoed in the payload and the rule summary, and a required-but-empty section raises `missing_template_section` |
 | Trend analysis | Analyse 2–20 ordered releases: per-release QA counts, publishability, sourced-entry ratio, vague/banned hits, consecutive deltas (`improving` / `stable` / `regressing`) and an overall verdict; render a table with SVG sparklines and export as CSV/JSON |
 | Draft comparison | Compare 2–10 complete draft payloads: per-draft QA metrics, a per-entry presence matrix (`identical` / `changed` / `unique`), a shared/unique breakdown and a deterministic publishability recommendation; export as CSV/JSON |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare` |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
 profile* selector defaults to *none* so current behaviour is unchanged; picking
 a profile pre-fills the *Workspace rules* panel. After a successful generate it
 also offers *Download QA CSV*, *Download checklist CSV*, *Download JSON*,
-*Download rules CSV* and *Download rules JSON*; after a diff it adds *Download
-diff CSV*. Those downloads are built in the browser from the payload already on
-screen, so they need no extra server round-trip. When a draft has a `draft_id`
+*Download rules CSV*, *Download rules JSON*, *Download template CSV* and
+*Download template JSON*; after a diff it adds *Download diff CSV*. A
+*Release-note template* selector is populated from `GET /api/templates` and is
+sent on generate and diff. Those downloads are built in the browser from the
+payload already on screen, so they need no extra server round-trip. When a draft has a `draft_id`
 the review controls also offer a *Copy share link* button that copies the
 read-only `GET /s/<draft_id>` URL. A *Trend* section accepts one
 release per block, renders the per-release table, inline SVG sparklines for the
@@ -73,14 +76,15 @@ releasenote/
   models.py     ChangeEntry, Flag, QAResult, canonical groups
   config.py     WorkspaceConfig: validated per-workspace QA rule overrides
   profiles.py   named reusable rule profiles + effective-rule summary
+  templates.py  named release-note templates: section order, intro/outro, required sections
   importer.py   CSV/JSON parsing + header aliasing
   grouping.py   bucketing by change type
-  qa.py         heuristic QA rules, workspace overrides and checklist
+  qa.py         heuristic QA rules, workspace overrides, template sections and checklist
   diff.py       compare two drafts: classification, repeated claims, regressions
   trend.py      multi-release trend analysis: metrics, deltas, verdicts
   compare.py    draft comparison matrix: metrics, presence, shared/unique, recommendation
-  generator.py  Markdown rendering with inline QA annotations
-  exporters.py  CSV / JSON rendering of qa, checklist, diff, trend, comparison and full payload
+  generator.py  Markdown rendering with inline QA annotations and a template layout
+  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, template, trend, comparison and full payload
   service.py    parse -> group -> qa -> render pipeline (+ build_diff, build_trend, build_comparison, reviews, shared drafts)
   storage.py    optional append-only draft history + review/audit store
   server.py     stdlib HTTP server + JSON API + read-only share pages
@@ -115,6 +119,14 @@ Workspace rules add two more flags when configured:
 - **missing_required_section** (medium): a canonical group listed in
   `required_sections` has no entries (a draft-level flag with an empty
   `entry_id`).
+
+A release-note template adds one more flag when a section it marks as required
+is empty:
+
+- **missing_template_section** (medium): a template section with
+  `required: true` has no entries, emitted once per empty required section (a
+  draft-level flag with an empty `entry_id`). It honours `severity_overrides`
+  like every other code.
 
 The release diff adds three more flags on the *current* draft when it is
 compared with a previous release:
@@ -492,6 +504,86 @@ payload. The feature ships in **v0.9.0** (Python package and Helm chart). No new
 third-party dependency is introduced; the standard library is still the only
 requirement.
 
+## Release-note templates
+
+**Goal.** The Copilot has always rendered a **fixed** Markdown skeleton: a
+title, the canonical groups in the order Features → Fixes → Breaking Changes →
+Other, and the QA checklist. Teams that publish to Confluence, GitHub Releases
+or e-mail usually need a different section order, an intro paragraph or a
+support footer, and a way to check that a draft follows the house template.
+A **release-note template** makes that layout explicit and reusable: a
+workspace attaches a named (built-in or inline) template to `POST
+/api/generate` and `POST /api/diff`, and the resolved template is echoed in the
+draft payload and the effective-rule summary.
+
+**Schema.** `releasenote.templates.ReleaseTemplate` is a frozen dataclass:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `name` | str | Short identifier (also the built-in lookup key). |
+| `description` | str | Human-readable explanation of the layout. |
+| `sections` | ordered list | Canonical group keys (`feature`, `fix`, `breaking`, `other`), each with a `required` boolean. Order defines rendering order. |
+| `intro` | str | Optional Markdown block rendered before the sections. |
+| `outro` | str | Optional Markdown block rendered after the sections. |
+
+Each section is a `TemplateSection` (`key`, `required`) and is serialised as
+`{key, title, required}` where `title` is the canonical group title. `POST
+/api/generate` / `POST /api/diff` accept the template in the request body's
+`template` field either as a built-in **name** (string) or as an **inline
+object** (`{"name": …, "sections": […], "intro": …, "outro": …}`).
+
+**Built-in templates.** `releasenote.templates.BUILTIN_TEMPLATES` ships three
+templates:
+
+| Template | Layout |
+| --- | --- |
+| `default` | Canonical order (Features, Fixes, Breaking Changes, Other), no intro or outro. Reproduces the historical output exactly. |
+| `github-release` | Breaking Changes first, then Features (required), Fixes and Other, with a `## What's Changed` intro and a `Full Changelog` outro. |
+| `email` | Fixes, then Features, then Breaking Changes (empty sections dropped), with a greeting intro and a `Thanks, / The Release Team` outro. |
+
+**Resolution and layering.** `resolve_template(profile_or_config,
+inline_template)` validates and merges an inline template over a built-in one:
+`sections` (when present) replaces the base order and `name`, `description`,
+`intro` and `outro` override one by one; the fields that are not supplied are
+inherited from the base. An inline `name` that matches a built-in selects it as
+the base, otherwise the `default` is used. `resolve_template_from_payload`
+reads the optional `template` field of a request body. Unknown template keys,
+non-canonical section keys and non-string fields raise `ValueError`; an unknown
+built-in name raises `UnknownTemplateError`. The API reports both as HTTP 400
+and never stores a draft.
+
+**Rendering.** `releasenote.generator.render_markdown` takes an optional
+template: it walks the template's sections in order, **skips** an empty section
+unless the template marks it required, renders the intro before and the outro
+after the sections, and renders an explicit `_(no entries)_` placeholder for a
+required-but-empty section. With no template the built-in `default` is used, so
+existing drafts are byte-for-byte unchanged.
+
+**The `missing_template_section` flag.** A section whose `required` flag is
+`true` but which has no entries raises exactly one **missing_template_section**
+flag (medium, empty `entry_id`). Like every other code it honours
+`severity_overrides`, so a workspace can promote it to `high`.
+
+**Endpoints.**
+
+| Endpoint | Body / query | Response |
+| --- | --- | --- |
+| `GET /api/templates` | — | The built-ins as `{"templates": [{"name", "description", "sections", "intro", "outro"}]}`. |
+| `GET /api/export/template.csv` | `format`, `title`, `content`, `profile`, `template` (and `previous`/`current` for a diff) | `text/csv` with the header `section,title,required,entry_count`, one row per template section. |
+| `GET /api/export/template.json` | same as `template.csv` | The resolved template with a per-section `entry_count`, as stable JSON. |
+
+An unknown `template` name returns HTTP 400 naming it and stores no draft, an
+invalid inline template returns HTTP 400, and unparseable content still returns
+HTTP 422. The exports reuse the existing `format`/`title`/`content`/`profile`
+query contract and answer with a `Content-Disposition: attachment` header.
+
+**Browser UI.** A *Release-note template* selector is populated from `GET
+/api/templates` and sent on generate and diff, and *Download template CSV* /
+*Download template JSON* buttons appear after a successful generate or diff
+(built in the browser from the payload already on screen). The feature ships in
+**v0.10.0** (Python package and Helm chart). No new third-party dependency is
+introduced; the standard library is still the only requirement.
+
 ## Share links
 
 **Goal.** Release Note QA Copilot exists to turn raw changelog and ticket
@@ -564,6 +656,8 @@ unset. The feature ships in **v0.8.0** (Python package and Helm chart).
 - Persist workspace rules server-side and version them alongside drafts.
 - Profile libraries per organisation, with profile versions attached to a draft
   so a past sign-off can be replayed against the rules that were live then.
+- Template libraries per organisation, with template versions attached to a
+  draft so a publish target can be reproduced later.
 - Authenticated, optionally expiring share links with per-recipient access
   control — the read-only public share view landed in **v0.8.0**; access
   control is still open.
@@ -586,6 +680,9 @@ Read-only draft share links for reviewer hand-off landed in **v0.8.0** — see
 The draft comparison matrix with per-entry presence and a publishability
 recommendation landed in **v0.9.0** — see
 [Draft comparison matrix](#draft-comparison-matrix).
+Release-note templates with section ordering, intro/outro and a
+`missing_template_section` flag landed in **v0.10.0** — see
+[Release-note templates](#release-note-templates).
 
 ## Success signals
 

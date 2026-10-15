@@ -157,6 +157,12 @@
               <option value="">(none — built-in rules)</option>
             </select>
           </div>
+          <div>
+            <label for="template">Release-note template</label>
+            <select id="template">
+              <option value="">(default — canonical order)</option>
+            </select>
+          </div>
         </div>
         <p class="muted">Pick a profile to pre-fill these fields, then tailor them. One term per line or comma separated.</p>
         <div class="row">
@@ -331,6 +337,8 @@
         <button id="downloadJson" class="secondary" type="button">Download JSON</button>
         <button id="downloadRulesCsv" class="secondary" type="button">Download rules CSV</button>
         <button id="downloadRulesJson" class="secondary" type="button">Download rules JSON</button>
+        <button id="downloadTemplateCsv" class="secondary" type="button">Download template CSV</button>
+        <button id="downloadTemplateJson" class="secondary" type="button">Download template JSON</button>
         <button id="downloadDiffCsv" class="secondary" type="button" hidden>Download diff CSV</button>
       </div>
       <pre id="markdown" aria-live="polite"></pre>
@@ -521,6 +529,23 @@
       }
     }
 
+    async function loadTemplates() {
+      try {
+        const data = await api("/api/templates");
+        const select = $("template");
+        (data.templates || []).forEach(template => {
+          const option = document.createElement("option");
+          option.value = template.name;
+          option.textContent = template.description
+            ? template.name + " — " + template.description
+            : template.name;
+          select.appendChild(option);
+        });
+      } catch (err) {
+        // The selector simply stays at the default if templates are unavailable.
+      }
+    }
+
     function renderResult(result) {
       const counts = result.qa.counts;
       $("summary").innerHTML =
@@ -588,6 +613,8 @@
       if (Object.keys(config).length) body.config = config;
       const profile = $("profile").value;
       if (profile) body.profile = profile;
+      const template = $("template").value;
+      if (template) body.template = template;
       try {
         const result = await api("/api/generate", {
           method: "POST",
@@ -623,6 +650,8 @@
       if (Object.keys(config).length) body.config = config;
       const profile = $("profile").value;
       if (profile) body.profile = profile;
+      const template = $("template").value;
+      if (template) body.template = template;
       try {
         const result = await api("/api/diff", {
           method: "POST",
@@ -744,6 +773,43 @@
       if (!lastResult || !lastResult.rules) return;
       saveBlob("qa-rules.json",
         JSON.stringify(lastResult.rules, null, 2), "application/json");
+    }
+
+    function buildTemplateExport(result) {
+      const template = result.template || {};
+      const counts = {};
+      (result.groups || []).forEach(group => {
+        counts[group.key] = (group.entries || []).length;
+      });
+      const sections = (template.sections || []).map(section => ({
+        section: section.key,
+        title: section.title || "",
+        required: !!section.required,
+        entry_count: counts[section.key] || 0
+      }));
+      return {
+        name: template.name || "",
+        description: template.description || "",
+        intro: template.intro || "",
+        outro: template.outro || "",
+        sections: sections
+      };
+    }
+
+    function downloadTemplateCsv() {
+      if (!lastResult) return;
+      const exportData = buildTemplateExport(lastResult);
+      const rows = exportData.sections.map(section =>
+        [section.section, section.title, pyBool(section.required), section.entry_count]
+      );
+      saveBlob("release-template.csv",
+        buildCsv(["section", "title", "required", "entry_count"], rows), "text/csv");
+    }
+
+    function downloadTemplateJson() {
+      if (!lastResult) return;
+      saveBlob("release-template.json",
+        stableJson(buildTemplateExport(lastResult), null), "application/json");
     }
 
     function parseTrendInput(text) {
@@ -1147,6 +1213,8 @@
     $("downloadJson").addEventListener("click", downloadJson);
     $("downloadRulesCsv").addEventListener("click", downloadRulesCsv);
     $("downloadRulesJson").addEventListener("click", downloadRulesJson);
+    $("downloadTemplateCsv").addEventListener("click", downloadTemplateCsv);
+    $("downloadTemplateJson").addEventListener("click", downloadTemplateJson);
     $("analyzeTrend").addEventListener("click", analyzeTrend);
     $("loadTrendSample").addEventListener("click", loadTrendSample);
     $("downloadTrendCsv").addEventListener("click", downloadTrendCsv);
@@ -1171,6 +1239,7 @@
     loadSample("csv");
     loadHistory();
     loadProfiles();
+    loadTemplates();
   </script>
 </body>
 </html>

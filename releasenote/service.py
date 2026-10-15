@@ -25,6 +25,13 @@ from .profiles import (
 )
 from .qa import analyze_entries, checklist
 from .storage import ReviewStore
+from .templates import (
+    ReleaseTemplate,
+    default_template,
+    resolve_template,
+    template_from_dict,
+    template_summary,
+)
 from .trend import compute_trend
 
 ConfigInput = Optional[Union[WorkspaceConfig, Dict[str, Any]]]
@@ -83,8 +90,10 @@ def _assemble(
     workspace: WorkspaceConfig,
     title: str,
     profile: Optional[str] = None,
+    template: Optional[ReleaseTemplate] = None,
 ) -> Dict[str, Any]:
     """Build the standard draft payload shared by generate and diff."""
+    template = template or default_template()
     groups = group_entries(entries)
     titles = group_titles()
     return {
@@ -103,9 +112,25 @@ def _assemble(
         "checklist": checklist(entries, qa),
         "config": workspace.to_dict(),
         "profile": profile,
-        "rules": rule_summary(entries, qa, workspace),
-        "markdown": render_markdown(title, entries, qa),
+        "template": template_summary(template),
+        "rules": rule_summary(entries, qa, workspace, template),
+        "markdown": render_markdown(title, entries, qa, template),
     }
+
+
+def _coerce_template(
+    template: Optional[Union[ReleaseTemplate, str, Dict[str, Any]]]
+) -> ReleaseTemplate:
+    """Normalise a template name / object / ``None`` into a template.
+
+    Raises :class:`releasenote.templates.UnknownTemplateError` for an unknown
+    name and :class:`ValueError` for an invalid inline template.
+    """
+    if template is None:
+        return default_template()
+    if isinstance(template, ReleaseTemplate):
+        return template
+    return resolve_template(template)
 
 
 def build_draft(
@@ -114,21 +139,28 @@ def build_draft(
     title: str = "Release Notes",
     config: ConfigInput = None,
     profile: Optional[str] = None,
+    template: Optional[Union[ReleaseTemplate, str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Parse ``content`` and return draft, groups and QA data.
 
     ``config`` is an optional workspace config mapping (or a
     :class:`~releasenote.config.WorkspaceConfig`). It is validated and its
     effective form is echoed back under the ``config`` key. ``profile`` is the
-    optional resolved profile name, echoed back under ``profile``.
+    optional resolved profile name, echoed back under ``profile``. ``template``
+    is an optional template name, object or :class:`ReleaseTemplate`; the
+    resolved template is echoed back under ``template``.
 
-    Raises :class:`releasenote.importer.ParseError` for invalid input and
-    :class:`ValueError` for an invalid config.
+    Raises :class:`releasenote.importer.ParseError` for invalid input,
+    :class:`ValueError` for an invalid config or template and
+    :class:`releasenote.templates.UnknownTemplateError` for an unknown template.
     """
     workspace = _coerce_config(config)
+    resolved_template = _coerce_template(template)
     entries = parse_entries(content, fmt)
-    qa = analyze_entries(entries, workspace)
-    return _assemble(entries, qa, workspace, title, profile)
+    qa = analyze_entries(entries, workspace, resolved_template)
+    return _assemble(
+        entries, qa, workspace, title, profile, resolved_template
+    )
 
 
 def build_diff(
@@ -138,6 +170,7 @@ def build_diff(
     title: str = "Release Notes",
     config: ConfigInput = None,
     profile: Optional[str] = None,
+    template: Optional[Union[ReleaseTemplate, str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Compare a previous and a current draft and annotate the current one.
 
@@ -146,16 +179,20 @@ def build_diff(
     diff flags merged into ``qa`` and a ``diff`` key holding the classified
     entries, repeated claims and regressions.
 
-    Raises :class:`releasenote.importer.ParseError` for invalid input and
-    :class:`ValueError` for an invalid config.
+    Raises :class:`releasenote.importer.ParseError` for invalid input,
+    :class:`ValueError` for an invalid config or template and
+    :class:`releasenote.templates.UnknownTemplateError` for an unknown template.
     """
     workspace = _coerce_config(config)
+    resolved_template = _coerce_template(template)
     previous = parse_entries(previous_content, fmt)
     current = parse_entries(current_content, fmt)
     diff, diff_flags = compute_diff(previous, current, workspace)
-    qa = analyze_entries(current, workspace)
+    qa = analyze_entries(current, workspace, resolved_template)
     qa.flags.extend(diff_flags)
-    payload = _assemble(current, qa, workspace, title, profile)
+    payload = _assemble(
+        current, qa, workspace, title, profile, resolved_template
+    )
     payload["diff"] = diff
     return payload
 
@@ -403,7 +440,11 @@ def get_shared_draft(
         if isinstance(config_data, dict)
         else WorkspaceConfig.default()
     )
-    qa = analyze_entries(entries, workspace)
+    try:
+        template = template_from_dict(record.get("template"))
+    except ValueError:
+        template = default_template()
+    qa = analyze_entries(entries, workspace, template)
 
     review_store = review_store if review_store is not None else ReviewStore()
     review_record = review_store.get(draft_id)
@@ -428,7 +469,8 @@ def get_shared_draft(
         "markdown": record.get("markdown", ""),
         "qa": qa.to_dict(),
         "checklist": checklist(entries, qa),
-        "rules": rule_summary(entries, qa, workspace),
+        "rules": rule_summary(entries, qa, workspace, template),
+        "template": template_summary(template),
         "review": review,
         "created_at": record.get("created_at", ""),
     }
