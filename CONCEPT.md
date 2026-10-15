@@ -38,7 +38,8 @@ The MVP is a dependency-free Python web application:
 | Checklist | Five pass/warn/fail checks plus a publishability verdict |
 | Export | Markdown download; JSON API for automation |
 | History | Optional file-backed store of generated drafts (`DATA_DIR`) |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/history`, `POST /api/generate` |
+| Workspace rules | Per-workspace JSON config: extra/allowed vague terms, banned phrases, required sections, severity overrides |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/history`, `POST /api/generate` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown.
@@ -48,9 +49,10 @@ data, generate, inspect QA flags and copy/download the Markdown.
 ```
 releasenote/
   models.py     ChangeEntry, Flag, QAResult, canonical groups
+  config.py     WorkspaceConfig: validated per-workspace QA rule overrides
   importer.py   CSV/JSON parsing + header aliasing
   grouping.py   bucketing by change type
-  qa.py         heuristic QA rules and checklist
+  qa.py         heuristic QA rules, workspace overrides and checklist
   generator.py  Markdown rendering with inline QA annotations
   service.py    parse -> group -> qa -> render pipeline
   storage.py    optional append-only draft history
@@ -79,7 +81,63 @@ Each rule is a deterministic heuristic so results are explainable:
   or required-action wording.
 - **missing_title** (high): an entry without a title.
 
-A draft is **publishable** once no high-severity flag remains.
+Workspace rules add two more flags when configured:
+
+- **banned_phrase** (medium): a literal phrase from `banned_phrases` appears in
+  an entry; the message names the matched phrase.
+- **missing_required_section** (medium): a canonical group listed in
+  `required_sections` has no entries (a draft-level flag with an empty
+  `entry_id`).
+
+A draft is **publishable** once no high-severity flag remains. Any flag code can
+be re-ranked to `high`/`medium`/`low` through `severity_overrides`.
+
+## Workspace configuration
+
+The single fixed set of QA heuristics is useful out of the box, but every team
+has its own vocabulary and tone. Release Note QA Copilot therefore supports a
+**workspace configuration** that is layered on top of the built-in rules during
+analysis, so a team can ban its own marketing words, whitelist terms it uses
+legitimately, require certain sections and re-rank flags — without losing the
+traceability core.
+
+**Where it is loaded from.** The config is optional and supplied per request.
+`POST /api/generate` accepts a `config` object in its JSON body, and the browser
+UI collects the same fields from the collapsible *Workspace rules* panel and
+sends them on generate. `GET /api/config/sample` returns a documented example
+that is valid input for the schema. No server-side file is required; a team that
+wants a fixed config can paste it into the request or default it in the UI.
+
+**Schema** (all fields optional; unknown keys are rejected):
+
+| Field | Type | Effect |
+| --- | --- | --- |
+| `extra_vague_terms` | list of strings | Appended to the built-in `VAGUE_TERMS`. |
+| `allow_terms` | list of strings | Removed from the effective vague list (case-insensitive). |
+| `required_sections` | list of strings | Canonical group keys (`feature`, `fix`, `breaking`, `other`) that must be non-empty, else a `missing_required_section` flag. |
+| `banned_phrases` | list of strings | Literal phrases that trigger a `banned_phrase` flag naming the match. |
+| `severity_overrides` | object mapping flag code → `high`/`medium`/`low` | Re-ranks the matching flag. |
+
+Validation is strict: non-object configs, non-string list entries and
+non-canonical severities raise `ValueError`, which the API reports as HTTP 400
+and never stores a draft. When no config is supplied the built-in rules and
+their severities are unchanged.
+
+Example payload:
+
+```json
+{
+  "extra_vague_terms": ["blazing", "revolutionary"],
+  "allow_terms": ["seamless"],
+  "required_sections": ["feature", "breaking"],
+  "banned_phrases": ["world's best", "guaranteed"],
+  "severity_overrides": {"vague_language": "high"}
+}
+```
+
+This works with the existing traceability model: the response echoes the
+*effective* config under `config`, so reviewers can see which rules produced
+each flag. The feature ships in **v0.2.0** (Python package and Helm chart).
 
 ## Deployment contract
 
@@ -99,10 +157,13 @@ A draft is **publishable** once no high-severity flag remains.
 
 - Confluence / GitHub Releases / e-mail publish integrations behind a review
   gate.
-- Team-specific term and tone rules configurable per workspace.
-- Optional LLM assistance for benefit wording that still cites a source.
 - Diff two releases to highlight regressions and repeated claims.
 - Multi-user roles (author / QA reviewer / approver) and audit log.
+- Optional LLM assistance for benefit wording that still cites a source.
+- Persist workspace rules server-side and version them alongside drafts.
+
+Per-workspace term and tone rules (was the first item in this list) landed in
+**v0.2.0** — see [Workspace configuration](#workspace-configuration).
 
 ## Success signals
 

@@ -10,6 +10,8 @@ unsupported claims are flagged before publishing.
 - Flag missing sources, vague wording, unsupported numbers and undocumented
   breaking changes.
 - Get a short QA checklist and a publishability verdict.
+- Tailor the QA rules per workspace (extra/allowed terms, banned phrases,
+  required sections, severity overrides).
 - Export Markdown for Confluence, GitHub Releases or e-mail.
 
 See [CONCEPT.md](CONCEPT.md) for the product goal, users and roadmap.
@@ -38,6 +40,7 @@ Configuration:
 | GET | `/healthz` | Liveness/readiness probe (`ok`) |
 | GET | `/api/version` | Product name and version |
 | GET | `/api/sample?format=csv\|json` | Example import payload |
+| GET | `/api/config/sample` | Example workspace-rules config |
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
 | POST | `/api/generate` | Build a draft |
@@ -49,7 +52,43 @@ Configuration:
 ```
 
 Response contains `markdown`, `qa` (flags + counts + `publishable`),
-`checklist`, the grouped `entries`, and a `draft_id` when history is enabled.
+`checklist`, the grouped `entries`, the effective `config`, and a `draft_id`
+when history is enabled.
+
+## Workspace rules
+
+QA heuristics can be tailored per workspace. Pass an optional `config` object
+to `POST /api/generate` (the UI's collapsible *Workspace rules* panel does this
+for you). `GET /api/config/sample` returns a valid example.
+
+| Field | Type | Effect |
+| --- | --- | --- |
+| `extra_vague_terms` | list of strings | Appended to the built-in vague-word list. |
+| `allow_terms` | list of strings | Removed from the effective vague list (case-insensitive). |
+| `required_sections` | list of strings | Group keys (`feature`, `fix`, `breaking`, `other`) that must be non-empty, else a `missing_required_section` flag (medium, empty `entry_id`). |
+| `banned_phrases` | list of strings | Literal phrases that trigger a `banned_phrase` flag (medium) naming the match. |
+| `severity_overrides` | object `code → high\|medium\|low` | Re-ranks matching flags. |
+
+All fields are optional. Unknown keys, non-string list entries and invalid
+severities are rejected with HTTP 400 and no draft is stored. With no `config`
+the built-in rules and severities are unchanged.
+
+```json
+{
+  "content": "id,type,title,description,benefit,source\nA,fix,Blazing sync,Sync is blazing fast,Quick,A\n",
+  "format": "csv",
+  "config": {
+    "extra_vague_terms": ["blazing"],
+    "allow_terms": ["seamless"],
+    "required_sections": ["breaking"],
+    "banned_phrases": ["world's best"],
+    "severity_overrides": {"vague_language": "high"}
+  }
+}
+```
+
+The response echoes the effective config under `config` so reviewers can see
+which rules produced each flag. Workspace rules were added in **v0.2.0**.
 
 ## Input format
 

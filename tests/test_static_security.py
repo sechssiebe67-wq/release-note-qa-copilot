@@ -34,6 +34,13 @@ UNTRUSTED = (
     "item.detail",
     "item.label",
     "d.title",
+    # Workspace config values echoed back by /api/generate.
+    "config.extra_vague_terms",
+    "config.allow_terms",
+    "config.banned_phrases",
+    "config.required_sections",
+    "config.severity_overrides",
+    "overrideCode",
 )
 
 _ESC_DEF_RE = re.compile(
