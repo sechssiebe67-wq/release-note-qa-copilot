@@ -14,6 +14,9 @@ unsupported claims are flagged before publishing.
   required sections, severity overrides).
 - Attach a named, reusable **QA rule profile** and see which rules were
   effective and which fired.
+- Render the draft with a **release-note template** (`default`,
+  `github-release`, `email` or inline) that controls section order, an optional
+  intro/outro and which sections are required.
 - Diff two releases to highlight regressions and repeated claims.
 - Compare **2–10 candidate drafts** side by side: per-draft QA metrics, a
   per-entry presence matrix (`identical` / `changed` / `unique`), a shared vs.
@@ -51,6 +54,7 @@ Configuration:
 | GET | `/api/sample?format=csv\|json` | Example import payload |
 | GET | `/api/config/sample` | Example workspace-rules config |
 | GET | `/api/profiles` | Built-in QA rule profiles (`name`, `description`, `config`) |
+| GET | `/api/templates` | Built-in release-note templates (`name`, `description`, `sections`, `intro`, `outro`) |
 | GET | `/api/trend/sample` | Example 3-release trend payload |
 | GET | `/api/compare/sample` | Example 2-draft comparison payload |
 | GET | `/api/export/qa.csv` | QA flags as CSV (`entry_id,code,severity,message`) |
@@ -58,6 +62,8 @@ Configuration:
 | GET | `/api/export/diff.csv` | Release diff as CSV (`category,id,title,type,reason`) |
 | GET | `/api/export/rules.csv` | Effective rule summary as CSV (`code,severity,count`) |
 | GET | `/api/export/rules.json` | Effective rule summary as JSON |
+| GET | `/api/export/template.csv` | Resolved template as CSV (`section,title,required,entry_count`) |
+| GET | `/api/export/template.json` | Resolved template with per-section entry counts as JSON |
 | GET | `/api/export/trend.csv` | Multi-release trend as CSV |
 | GET | `/api/export/trend.json` | Multi-release trend as JSON |
 | GET | `/api/export/comparison.csv` | Draft comparison per-draft metrics as CSV |
@@ -83,14 +89,16 @@ Configuration:
   "title": "Release 2.0",
   "content": "<csv or json text>",
   "profile": "strict",
-  "config": {}
+  "config": {},
+  "template": "github-release"
 }
 ```
 
-`profile` and `config` are both optional. Response contains `markdown`, `qa`
-(flags + counts + `publishable`), `checklist`, the grouped `entries`, the
-effective `config`, the resolved `profile` (or `null`), a `rules` summary, and
-a `draft_id` when history is enabled.
+`profile`, `config` and `template` are all optional. Response contains
+`markdown`, `qa` (flags + counts + `publishable`), `checklist`, the grouped
+`entries`, the effective `config`, the resolved `profile` (or `null`), the
+resolved `template`, a `rules` summary (which includes the resolved template),
+and a `draft_id` when history is enabled.
 
 ## Workspace rules
 
@@ -170,6 +178,71 @@ curl -G 'http://127.0.0.1:8080/api/export/rules.csv' \
 
 The QA rule profiles and the effective-rule summary were added in **v0.6.0**.
 
+## Release-note templates
+
+A **template** controls the Markdown layout of a draft: which canonical groups
+appear, in which order, an optional intro/outro block and which sections are
+required. Pass an optional `template` to `POST /api/generate` or `POST
+/api/diff` as a built-in **name** or an inline object. `GET /api/templates`
+lists the built-ins:
+
+| Template | Layout |
+| --- | --- |
+| `default` | Canonical order (Features, Fixes, Breaking Changes, Other), no intro/outro. |
+| `github-release` | Breaking Changes first, then Features (required), Fixes, Other; `## What's Changed` intro and `Full Changelog` outro. |
+| `email` | Fixes, Features, Breaking Changes (empty dropped); greeting intro and `Thanks, / The Release Team` outro. |
+
+An inline template layers over a built-in one (`sections` replaces the order;
+the other fields override one by one):
+
+| Field | Type | Effect |
+| --- | --- | --- |
+| `name` | string | Built-in to use as the base (unknown names fall back to `default` when the object is otherwise valid). |
+| `description` | string | Human-readable description echoed back. |
+| `sections` | list | Ordered `{"key": "feature"\|"fix"\|"breaking"\|"other", "required": bool}` objects (naked strings are allowed and default to `required: false`). |
+| `intro` | string | Markdown block rendered before the sections. |
+| `outro` | string | Markdown block rendered after the sections. |
+
+Empty sections are skipped unless `required` is true; a required-but-empty
+section renders `_(no entries)_` and raises one **`missing_template_section`**
+flag (medium, empty `entry_id`), which honours `severity_overrides`. The
+resolved template is echoed under `template` in the draft payload and under
+`rules.template`. An unknown name returns HTTP 400 naming it and stores no
+draft; an invalid inline template returns HTTP 400.
+
+```sh
+curl 'http://127.0.0.1:8080/api/templates'
+```
+
+```sh
+curl -X POST 'http://127.0.0.1:8080/api/generate' \
+  -H 'Content-Type: application/json' \
+  -d '{"format": "csv", "template": "github-release", "content": "id,type,title,description,benefit,source\nA,feature,Add SSO,SAML login,Central control,A\n"}'
+```
+
+Download the resolved template (one row per section):
+
+```sh
+curl -G 'http://127.0.0.1:8080/api/export/template.csv' \
+  --data-urlencode 'format=csv' \
+  --data-urlencode 'template=github-release' \
+  --data-urlencode $'content=id,type,title,description,benefit,source\nA,fix,Fix login,Login no longer fails,Reliable access,A\n'
+```
+
+```csv
+section,title,required,entry_count
+breaking,Breaking Changes,False,0
+feature,Features,True,0
+fix,Fixes,False,1
+other,Other Changes,False,0
+```
+
+`GET /api/export/template.csv` and `GET /api/export/template.json` accept the
+same `format`, `title`, `content`, `profile` and `template` query parameters as
+the other exports (plus `previous`/`current` for a diff) and answer with a
+`Content-Disposition: attachment` header. Release-note templates were added in
+**v0.10.0**.
+
 ## Comparing releases
 
 `POST /api/diff` compares a previous release with the current draft and flags
@@ -228,7 +301,8 @@ JSON from the UI (the *Download QA CSV*, *Download checklist CSV*, *Download
 JSON* and *Download diff CSV* buttons appear after a successful generate/diff)
 or fetched directly from the API. The export endpoints accept the same
 `format`, `title` and `content` query parameters as `POST /api/generate`, plus
-`previous` and `current` for `diff.csv` and an optional `profile`. They answer
+`previous` and `current` for `diff.csv` and an optional `profile` / `template`.
+They answer
 with `text/csv` or `application/json` and a
 `Content-Disposition: attachment; filename=...` header; missing or invalid
 parameters return HTTP 400 and unparseable content returns HTTP 422.
@@ -240,6 +314,8 @@ parameters return HTTP 400 and unparseable content returns HTTP 422.
 | `GET /api/export/diff.csv` | `category,id,title,type,reason` — one row per item, `category` ∈ `added`, `changed`, `removed`, `unchanged`, `repeated_claims`, `regressions`. |
 | `GET /api/export/rules.csv` | `code,severity,count` — one row per firing flag code (header only when nothing fired). |
 | `GET /api/export/rules.json` | The effective `rules` summary as JSON. |
+| `GET /api/export/template.csv` | `section,title,required,entry_count` — one row per resolved template section. |
+| `GET /api/export/template.json` | The resolved template with a per-section `entry_count` as JSON. |
 | `GET /api/export/draft.json` | The full payload as JSON (stable key order, UTF-8, no `NaN`). |
 
 CSV uses `\n` line endings and quotes any field containing a comma, quote or

@@ -30,6 +30,18 @@ from .profiles import (
 from .importer import parse_entries, parse_csv, parse_json, ParseError
 from .grouping import group_entries
 from .qa import analyze_entries, analyze_entry, effective_vague_terms
+from .templates import (
+    BUILTIN_TEMPLATES,
+    ReleaseTemplate,
+    TemplateSection,
+    UnknownTemplateError,
+    default_template,
+    get_template,
+    list_templates,
+    normalize_template_name,
+    resolve_template,
+    template_summary,
+)
 from .generator import render_markdown, render_qa_checklist
 from .diff import diff_drafts, compute_diff
 from .trend import compute_trend
@@ -44,6 +56,8 @@ from .exporters import (
     qa_flags_csv,
     rules_csv,
     rules_json,
+    template_csv,
+    template_json,
     trend_csv,
     trend_json,
 )
@@ -84,6 +98,16 @@ __all__ = [
     "analyze_entries",
     "analyze_entry",
     "effective_vague_terms",
+    "ReleaseTemplate",
+    "TemplateSection",
+    "UnknownTemplateError",
+    "BUILTIN_TEMPLATES",
+    "default_template",
+    "get_template",
+    "list_templates",
+    "normalize_template_name",
+    "resolve_template",
+    "template_summary",
     "render_markdown",
     "render_qa_checklist",
     "diff_drafts",
@@ -97,6 +121,8 @@ __all__ = [
     "diff_csv",
     "rules_csv",
     "rules_json",
+    "template_csv",
+    "template_json",
     "trend_csv",
     "trend_json",
     "draft_json",
@@ -111,4 +137,4 @@ __all__ = [
     "HistoryRequiredError",
 ]
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"

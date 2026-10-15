@@ -16,12 +16,15 @@ import csv
 import io
 import json
 from collections.abc import Mapping
-from typing import Any, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Sequence
+
+from .templates import default_template
 
 QA_FLAG_HEADER = ("entry_id", "code", "severity", "message")
 CHECKLIST_HEADER = ("label", "status", "detail")
 DIFF_HEADER = ("category", "id", "title", "type", "reason")
 RULES_HEADER = ("code", "severity", "count")
+TEMPLATE_HEADER = ("section", "title", "required", "entry_count")
 TREND_HEADER = (
     "label",
     "entry_count",
@@ -158,6 +161,77 @@ def rules_json(payload: Mapping[str, Any]) -> str:
     )
 
 
+def _section_counts(payload: Mapping[str, Any]) -> Dict[str, int]:
+    """Map each canonical group key to the number of entries it holds."""
+    counts: Dict[str, int] = {}
+    for group in _as_list(_as_mapping(payload).get("groups")):
+        item = _as_mapping(group)
+        key = item.get("key")
+        if isinstance(key, str):
+            counts[key] = len(_as_list(item.get("entries")))
+    return counts
+
+
+def _template_export(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return the resolved template with a per-section ``entry_count``.
+
+    Falls back to the built-in ``default`` template when the payload carries no
+    template, so the shape is always stable.
+    """
+    data = _as_mapping(payload)
+    template = _as_mapping(data.get("template")) or default_template().to_dict()
+    counts = _section_counts(data)
+    sections: List[Dict[str, Any]] = []
+    for item in _as_list(template.get("sections")):
+        section = _as_mapping(item)
+        key = section.get("key", "")
+        sections.append(
+            {
+                "section": key,
+                "title": section.get("title", ""),
+                "required": bool(section.get("required", False)),
+                "entry_count": counts.get(key, 0),
+            }
+        )
+    return {
+        "name": template.get("name", ""),
+        "description": template.get("description", ""),
+        "intro": template.get("intro", ""),
+        "outro": template.get("outro", ""),
+        "sections": sections,
+    }
+
+
+def template_csv(payload: Mapping[str, Any]) -> str:
+    """Return one CSV row per template section.
+
+    Header: ``section,title,required,entry_count``. ``required`` is rendered as
+    ``True`` / ``False`` so the CSV round-trips through standard parsers. A
+    payload without a template falls back to the built-in ``default``.
+    """
+    export = _template_export(payload)
+    rows = [
+        (
+            section["section"],
+            section["title"],
+            section["required"],
+            section["entry_count"],
+        )
+        for section in export["sections"]
+    ]
+    return _render_csv(TEMPLATE_HEADER, rows)
+
+
+def template_json(payload: Mapping[str, Any]) -> str:
+    """Serialise the resolved template (with entry counts) as stable JSON."""
+    return json.dumps(
+        _template_export(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
 def trend_csv(report: Mapping[str, Any]) -> str:
     """Return one CSV row per release: the documented trend header.
 
@@ -280,6 +354,7 @@ __all__ = [
     "CHECKLIST_HEADER",
     "DIFF_HEADER",
     "RULES_HEADER",
+    "TEMPLATE_HEADER",
     "TREND_HEADER",
     "COMPARISON_HEADER",
     "COMPARISON_MATRIX_HEADER",
@@ -289,6 +364,8 @@ __all__ = [
     "diff_csv",
     "rules_csv",
     "rules_json",
+    "template_csv",
+    "template_json",
     "trend_csv",
     "trend_json",
     "draft_json",

@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .grouping import group_entries, group_titles
 from .models import (
-    GROUP_ORDER,
     ChangeEntry,
     Flag,
     QAResult,
 )
 from .qa import checklist
+from .templates import ReleaseTemplate, default_template
 
 
 _SEVERITY_ICON = {
@@ -82,8 +82,17 @@ def render_markdown(
     title: str,
     entries: List[ChangeEntry],
     qa: QAResult,
+    template: Optional[ReleaseTemplate] = None,
 ) -> str:
-    """Render the complete Markdown release-note draft."""
+    """Render the complete Markdown release-note draft.
+
+    ``template`` controls the section order and the optional intro/outro.
+    Empty sections are skipped unless the template marks them ``required``, in
+    which case an explicit ``_(no entries)_`` placeholder is rendered. When no
+    template is given the built-in ``default`` layout is used, which reproduces
+    the historical output exactly.
+    """
+    template = template or default_template()
     groups = group_entries(entries)
     titles = group_titles()
     flags_by_entry: Dict[str, List[Flag]] = {}
@@ -106,15 +115,31 @@ def render_markdown(
     )
     lines.append("")
 
-    for group in GROUP_ORDER:
-        group_entries_list = groups.get(group, [])
+    if template.intro.strip():
+        lines.append(template.intro.strip())
+        lines.append("")
+
+    for section in template.sections:
+        group_entries_list = groups.get(section.key, [])
         if not group_entries_list:
+            if not section.required:
+                continue
+            lines.append(
+                "## {}".format(titles.get(section.key, section.key.title()))
+            )
+            lines.append("")
+            lines.append("_(no entries)_")
+            lines.append("")
             continue
-        lines.append("## {}".format(titles.get(group, group.title())))
+        lines.append("## {}".format(titles.get(section.key, section.key.title())))
         lines.append("")
         for entry in group_entries_list:
             lines.extend(render_entry(entry, flags_by_entry.get(entry.id, [])))
             lines.append("")
+
+    if template.outro.strip():
+        lines.append(template.outro.strip())
+        lines.append("")
 
     lines.append("---")
     lines.append("")

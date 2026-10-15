@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 from .config import WorkspaceConfig
 from .models import ChangeEntry, QAResult, worst_severity
 from .qa import effective_vague_terms
+from .templates import ReleaseTemplate, template_summary
 
 
 @dataclass
@@ -206,12 +207,13 @@ def rule_summary(
     entries: List[ChangeEntry],
     qa: QAResult,
     config: Optional[WorkspaceConfig] = None,
+    template: Optional[ReleaseTemplate] = None,
 ) -> Dict[str, Any]:
     """Return a deterministic, JSON-serialisable summary of the effective rules.
 
     Reports the effective vague-term list, banned phrases, required sections,
-    every severity override and, per flag code, how many flags fired and the
-    severity they resolved to.
+    every severity override, the resolved ``template`` and, per flag code, how
+    many flags fired and the severity they resolved to.
     """
     config = config or WorkspaceConfig.default()
     flags = list(qa.flags)
@@ -234,6 +236,7 @@ def rule_summary(
         "flag_counts": counts,
         "flag_severities": severities,
         "total_flags": len(flags),
+        "template": template_summary(template),
     }
 
 

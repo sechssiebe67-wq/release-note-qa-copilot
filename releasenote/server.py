@@ -26,6 +26,8 @@ from .exporters import (
     qa_flags_csv,
     rules_csv,
     rules_json,
+    template_csv,
+    template_json,
     trend_csv,
     trend_json,
 )
@@ -35,6 +37,12 @@ from .profiles import (
     list_profiles,
     normalize_profile_name,
     resolve_config,
+)
+from .templates import (
+    UnknownTemplateError,
+    list_templates,
+    resolve_template,
+    resolve_template_from_payload,
 )
 from .service import (
     HistoryRequiredError,
@@ -63,8 +71,17 @@ _EXPORTS = {
     "/api/export/diff.csv": ("text/csv", "release-diff.csv"),
     "/api/export/rules.csv": ("text/csv", "qa-rules.csv"),
     "/api/export/rules.json": ("application/json; charset=utf-8", "qa-rules.json"),
+    "/api/export/template.csv": ("text/csv", "release-template.csv"),
+    "/api/export/template.json": (
+        "application/json; charset=utf-8",
+        "release-template.json",
+    ),
     "/api/export/draft.json": ("application/json; charset=utf-8", "release-draft.json"),
 }
+
+# Exports whose query contract accepts ``previous``/``current`` (a diff) as
+# well as ``content`` (a single draft).
+_TEMPLATE_EXPORTS = ("/api/export/template.csv", "/api/export/template.json")
 
 # Trend exports built from repeated ``release=label:content`` query params.
 _TREND_EXPORTS = {
@@ -307,6 +324,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/profiles":
             self._send_json(200, {"profiles": list_profiles()})
             return
+        if path == "/api/templates":
+            self._send_json(200, {"templates": list_templates()})
+            return
         if path == "/api/trend/sample":
             self._send_json(200, sample_trend())
             return
@@ -467,9 +487,10 @@ class Handler(BaseHTTPRequestHandler):
         """Serve a CSV or JSON export built from query parameters.
 
         The endpoints mirror ``/api/generate`` and ``/api/diff``: ``format``,
-        ``title`` and ``content`` (plus ``previous``/``current`` for the diff
-        export) are accepted as query parameters. Missing or invalid
-        parameters return 400, while unparseable content returns 422.
+        ``title``, ``content``, ``profile`` and ``template`` (plus
+        ``previous``/``current`` for a diff) are accepted as query parameters.
+        The template exports accept either a single draft or a diff. Missing or
+        invalid parameters return 400, while unparseable content returns 422.
         """
         query = parse_qs(parsed.query)
         fmt = _first(query, "format", "auto")
@@ -488,6 +509,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid config: {}".format(exc)})
             return
         try:
+            template = resolve_template(_first(query, "template"))
+        except UnknownTemplateError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": "invalid template: {}".format(exc)})
+            return
+        try:
             if path == "/api/export/diff.csv":
                 previous = _first(query, "previous")
                 current = _first(query, "current")
@@ -498,16 +527,45 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(400, {"error": "query 'current' is required"})
                     return
                 result = build_diff(
-                    previous, current, fmt, title, workspace, profile_name
+                    previous, current, fmt, title, workspace, profile_name,
+                    template,
                 )
                 body = diff_csv(result)
+            elif path in _TEMPLATE_EXPORTS:
+                previous = _first(query, "previous")
+                current = _first(query, "current")
+                if previous is not None and current is not None:
+                    if not previous.strip() or not current.strip():
+                        self._send_json(
+                            400, {"error": "query 'previous' and 'current' are required"}
+                        )
+                        return
+                    result = build_diff(
+                        previous, current, fmt, title, workspace, profile_name,
+                        template,
+                    )
+                else:
+                    content = _first(query, "content")
+                    if not content or not content.strip():
+                        self._send_json(
+                            400, {"error": "query 'content' is required"}
+                        )
+                        return
+                    result = build_draft(
+                        content, fmt, title, workspace, profile_name, template
+                    )
+                body = (
+                    template_csv(result)
+                    if path.endswith(".csv")
+                    else template_json(result)
+                )
             else:
                 content = _first(query, "content")
                 if not content or not content.strip():
                     self._send_json(400, {"error": "query 'content' is required"})
                     return
                 result = build_draft(
-                    content, fmt, title, workspace, profile_name
+                    content, fmt, title, workspace, profile_name, template
                 )
                 if path == "/api/export/qa.csv":
                     body = qa_flags_csv(result)
@@ -594,6 +652,7 @@ class Handler(BaseHTTPRequestHandler):
             entries=result.get("entries"),
             config=result.get("config"),
             profile=result.get("profile"),
+            template=result.get("template"),
         )
         result["draft_id"] = record["id"]
 
@@ -619,13 +678,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _resolve_request(
         self, payload: Dict[str, Any]
-    ) -> Optional[Tuple[WorkspaceConfig, Optional[str]]]:
-        """Resolve the optional ``profile``/``config`` fields.
+    ) -> Optional[Tuple[WorkspaceConfig, Optional[str], Any]]:
+        """Resolve the optional ``profile``/``config``/``template`` fields.
 
-        Returns ``(workspace, profile_name)`` where ``profile_name`` is the
-        resolved profile or ``None``. On error a 400 response is sent and
-        ``None`` is returned; an unknown profile names the profile in the
-        message.
+        Returns ``(workspace, profile_name, template)`` where ``profile_name``
+        is the resolved profile or ``None`` and ``template`` is the resolved
+        :class:`~releasenote.templates.ReleaseTemplate`. On error a 400
+        response is sent and ``None`` is returned; an unknown profile or
+        template names the offending value in the message.
         """
         try:
             profile_name = normalize_profile_name(payload.get("profile"))
@@ -636,7 +696,15 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_json(400, {"error": "invalid config: {}".format(exc)})
             return None
-        return workspace, profile_name
+        try:
+            template = resolve_template_from_payload(payload)
+        except UnknownTemplateError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return None
+        except ValueError as exc:
+            self._send_json(400, {"error": "invalid template: {}".format(exc)})
+            return None
+        return workspace, profile_name, template
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -665,11 +733,11 @@ class Handler(BaseHTTPRequestHandler):
         resolved = self._resolve_request(payload)
         if resolved is None:
             return
-        workspace, profile_name = resolved
+        workspace, profile_name, template = resolved
         if path == "/api/generate":
-            self._post_generate(payload, workspace, profile_name)
+            self._post_generate(payload, workspace, profile_name, template)
         else:
-            self._post_diff(payload, workspace, profile_name)
+            self._post_diff(payload, workspace, profile_name, template)
 
     def _post_review(self, payload: Dict[str, Any]) -> None:
         draft_id = payload.get("draft_id")
@@ -739,6 +807,7 @@ class Handler(BaseHTTPRequestHandler):
         payload: Dict[str, Any],
         workspace: WorkspaceConfig,
         profile: Optional[str] = None,
+        template: Optional[Any] = None,
     ) -> None:
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
@@ -750,7 +819,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "'format' and 'title' must be strings"})
             return
         try:
-            result = build_draft(content, fmt, title, workspace, profile)
+            result = build_draft(
+                content, fmt, title, workspace, profile, template
+            )
         except ParseError as exc:
             self._send_json(422, {"error": str(exc)})
             return
@@ -765,6 +836,7 @@ class Handler(BaseHTTPRequestHandler):
         payload: Dict[str, Any],
         workspace: WorkspaceConfig,
         profile: Optional[str] = None,
+        template: Optional[Any] = None,
     ) -> None:
         previous = payload.get("previous")
         if not isinstance(previous, str) or not previous.strip():
@@ -780,7 +852,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "'format' and 'title' must be strings"})
             return
         try:
-            result = build_diff(previous, current, fmt, title, workspace, profile)
+            result = build_diff(
+                previous, current, fmt, title, workspace, profile, template
+            )
         except ParseError as exc:
             self._send_json(422, {"error": str(exc)})
             return
