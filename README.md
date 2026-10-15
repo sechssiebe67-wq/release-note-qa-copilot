@@ -35,6 +35,9 @@ unsupported claims are flagged before publishing.
 - Find a past draft again with a searchable **archive**: filter by title/entry
   title, tag, review status, score band and date, and organise drafts into sets
   with free-form tags kept in an append-only tag log.
+- Track how a draft evolves with **draft versioning**: generating again with the
+  same `draft_key` appends an immutable version, and you can list versions, diff
+  two of them and roll back to a previous one.
 
 See [CONCEPT.md](CONCEPT.md) for the product goal, users and roadmap.
 
@@ -53,7 +56,7 @@ Configuration:
 | --- | --- | --- |
 | `HOST` | `0.0.0.0` | Listen address |
 | `PORT` | `8080` | Listen port |
-| `DATA_DIR` | unset | Enable draft history plus durable review/audit and archive tag logs below this directory |
+| `DATA_DIR` | unset | Enable draft history plus durable review/audit, archive tag and draft version logs below this directory |
 
 ## HTTP API
 
@@ -86,6 +89,9 @@ Configuration:
 | GET | `/api/export/score.json` | Full `score` object as JSON |
 | GET | `/api/export/archive.csv` | Draft archive listing as CSV (`draft_id,title,created_at,status,band,entry_count,tags`) |
 | GET | `/api/export/archive.json` | Full draft archive listing as JSON |
+| GET | `/api/export/versions.csv` | Draft version listing as CSV (`version,draft_id,created_at`) |
+| GET | `/api/export/versions.json` | Full draft version listing as JSON |
+| GET | `/api/export/version-diff.csv` | Version diff as CSV (`version,category,id,title,type,reason`) |
 | GET | `/api/export/draft.json` | Full draft payload as JSON |
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
@@ -93,12 +99,16 @@ Configuration:
 | GET | `/api/archive` | Search/filter/paginate the stored draft archive (needs `DATA_DIR`) |
 | GET | `/api/archive/<draft_id>` | One archived draft’s metadata, tags and tag audit trail |
 | GET | `/api/archive/sample` | Example archive listing for the UI and tests |
+| GET | `/api/versions/<draft_key>` | List versions of a logical draft in ascending order (needs `DATA_DIR`) |
+| GET | `/api/versions/<draft_key>/<version>` | One stored version payload (needs `DATA_DIR`) |
 | GET | `/api/share/<draft_id>` | Read-only JSON view of a stored draft (needs `DATA_DIR`) |
 | GET | `/s/<draft_id>` | Read-only HTML share page for a stored draft (needs `DATA_DIR`) |
 | POST | `/api/generate` | Build a draft |
 | POST | `/api/diff` | Compare a previous and a current draft |
 | POST | `/api/review` | Record an approve / reject / reset transition |
 | POST | `/api/archive/tag` | Add or remove a tag on a stored draft |
+| POST | `/api/versions/diff` | Diff two versions of the same logical draft |
+| POST | `/api/versions/rollback` | Roll back to a stored version |
 | POST | `/api/trend` | Analyse an ordered list of 2–20 releases |
 | POST | `/api/compare` | Compare 2–10 candidate drafts |
 | POST | `/api/compare-profiles` | Compare one changelog across QA rule profiles |
@@ -112,16 +122,19 @@ Configuration:
   "content": "<csv or json text>",
   "profile": "strict",
   "config": {},
-  "template": "github-release"
+  "template": "github-release",
+  "draft_key": "release-2.0"
 }
 ```
 
-`profile`, `config` and `template` are all optional. Response contains
-`markdown`, `qa` (flags + counts + `publishable`), `checklist`, the grouped
-`entries`, the effective `config`, the resolved `profile` (or `null`), the
-resolved `template`, a `rules` summary (which includes the resolved template and
-the effective gate), the `score` (with its `band` and `penalties`), the `gate`
-decision (`status` + `reasons`), and a `draft_id` when history is enabled.
+`profile`, `config`, `template` and `draft_key` are all optional. Response
+contains `markdown`, `qa` (flags + counts + `publishable`), `checklist`, the
+grouped `entries`, the effective `config`, the resolved `profile` (or `null`),
+the resolved `template`, a `rules` summary (which includes the resolved template
+and the effective gate), the `score` (with its `band` and `penalties`), the
+`gate` decision (`status` + `reasons`), and a `draft_id` when history is
+enabled. When `draft_key` is supplied and history is enabled the payload also
+echoes `draft_key` and the assigned `version`.
 
 ## Workspace rules
 
@@ -522,6 +535,69 @@ case; with history enabled it shows a search box, tag/status/band filters, a
 results table with per-row *Open share page* and tag add/remove controls, and
 *Download archive CSV* / *Download archive JSON* buttons built in the browser
 from the returned listing. The feature was added in **v0.13.0** and needs no
+third-party dependency.
+
+## Draft versioning
+
+The review log records state transitions but not the content that was approved,
+so there is no way to see how a draft evolved, compare two revisions or revert
+to an earlier one. When `DATA_DIR` is set, supplying an optional **`draft_key`**
+to `POST /api/generate` treats the draft as a logical document and appends an
+**immutable version** every time it is regenerated instead of overwriting it:
+
+```sh
+# Generate two versions of the same logical draft.
+curl -X POST 'http://127.0.0.1:8080/api/generate' \
+  -H 'Content-Type: application/json' \
+  -d '{"content": "<csv or json text>", "format": "csv", "draft_key": "release-2.0"}'
+
+# List versions (ascending) and fetch one payload.
+curl 'http://127.0.0.1:8080/api/versions/release-2.0'
+curl 'http://127.0.0.1:8080/api/versions/release-2.0/1'
+
+# Diff two versions (same six categories as POST /api/diff).
+curl -X POST 'http://127.0.0.1:8080/api/versions/diff' \
+  -H 'Content-Type: application/json' \
+  -d '{"draft_key": "release-2.0", "previous_version": 1, "current_version": 2}'
+
+# Roll back to a version (response carries rolled_back_from).
+curl -X POST 'http://127.0.0.1:8080/api/versions/rollback' \
+  -H 'Content-Type: application/json' \
+  -d '{"draft_key": "release-2.0", "version": 1}'
+
+# Download the version listing / version diff.
+curl 'http://127.0.0.1:8080/api/export/versions.csv?draft_key=release-2.0'
+curl 'http://127.0.0.1:8080/api/export/versions.json?draft_key=release-2.0'
+curl 'http://127.0.0.1:8080/api/export/version-diff.csv?draft_key=release-2.0&previous_version=1&current_version=2'
+```
+
+A `draft_key` is a trimmed, non-empty slug of at most 64 characters matching
+`[a-z0-9][a-z0-9._-]*` (for example `release-2.0` or `security_patch`). Every
+version is appended to `<DATA_DIR>/versions.jsonl` as one line carrying a
+monotonically increasing `seq`, the canonical `draft_key`, the integer
+`version`, the `draft_id` of the stored draft, an ISO-8601 UTC `created_at` and
+the full `payload`; the latest line per `(draft_key, version)` wins when
+reading, so the log is append-only.
+
+| Endpoint | Body / query | Response |
+| --- | --- | --- |
+| `GET /api/versions/<draft_key>` | — | `{draft_key, versions: [{version, draft_id, created_at}]}` ascending; an unknown key yields `[]`. |
+| `GET /api/versions/<draft_key>/<version>` | — | The stored version payload. |
+| `POST /api/versions/diff` | `{"draft_key", "previous_version", "current_version", "config"?}` | `{previous_version, current_version, diff, flags}`. |
+| `POST /api/versions/rollback` | `{"draft_key", "version"}` | The target payload with `rolled_back_from` set to the previously latest version. |
+| `GET /api/export/versions.csv` | `draft_key` | `version,draft_id,created_at` — one row per version. |
+| `GET /api/export/versions.json` | `draft_key` | The full version listing as stable UTF-8 JSON. |
+| `GET /api/export/version-diff.csv` | `draft_key`, `previous_version`, `current_version` | `version,category,id,title,type,reason`, where `version` is `current_version`. |
+
+A malformed key or body returns HTTP 400, an unknown version returns HTTP 404
+and the exports set a `Content-Disposition: attachment` header. Versioning
+**requires `DATA_DIR`**: without durable history there is nothing to version, so
+every versioning endpoint returns HTTP 409 naming `DATA_DIR` and the UI hides
+the *Versions* panel behind a hint. With history enabled, the *Draft key* input
+next to the generate controls makes a draft versioned and a *Versions* panel
+lists each version with *View*, *Diff against latest* and *Roll back* actions
+plus *Download versions CSV* / *Download versions JSON* (and *Download version
+diff CSV* after a diff). The feature was added in **v0.14.0** and needs no
 third-party dependency.
 
 ## Trend analysis

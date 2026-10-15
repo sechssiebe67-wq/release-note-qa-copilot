@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from .archive import TAG_ACTIONS, TAG_ADD, validate_tag
 from .models import REVIEW_PENDING, ReviewRecord
+from .versioning import next_version, validate_draft_key
 
 
 class DraftStore:
@@ -384,3 +385,148 @@ class ArchiveStore:
             records = self._read_all()
         selected = [r for r in records if r.get("draft_id") == draft_id]
         return sorted(selected, key=lambda item: item.get("seq", 0))
+
+
+class DraftVersionStore:
+    """Append-only store of immutable draft versions.
+
+    Every version of a logical draft (identified by a caller-supplied
+    ``draft_key``) is appended to ``<data_dir>/versions.jsonl`` as one JSON
+    object per line carrying a monotonically increasing ``seq``, the canonical
+    ``draft_key``, the integer ``version``, the ``draft_id`` of the stored
+    draft, an ISO-8601 UTC ``created_at`` and the full ``payload``. The
+    **latest line per ``(draft_key, version)``** wins when reading, so an
+    accidental rewrite can be superseded without losing the log.
+
+    When ``data_dir`` is unset the store falls back to an in-memory list, so
+    the object can still be constructed and exercised but nothing survives a
+    restart. :attr:`is_durable` reports which mode is active.
+    """
+
+    def __init__(self, data_dir: Optional[str] = None) -> None:
+        self.data_dir = data_dir
+        if data_dir:
+            os.makedirs(data_dir, exist_ok=True)
+            self.path: Optional[str] = os.path.join(data_dir, "versions.jsonl")
+        else:
+            self.path = None
+        self._lock = threading.Lock()
+        self._records: List[Dict[str, Any]] = []
+
+    @property
+    def is_durable(self) -> bool:
+        """Whether versions are persisted to disk (``DATA_DIR`` set)."""
+        return self.path is not None
+
+    # -- persistence helpers --------------------------------------------
+    def _read_jsonl(self, path: Optional[str]) -> List[Dict[str, Any]]:
+        if not path or not os.path.exists(path):
+            return []
+        records: List[Dict[str, Any]] = []
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return records
+
+    def _append_jsonl(self, path: str, record: Dict[str, Any]) -> None:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _read_all(self) -> List[Dict[str, Any]]:
+        if self.path:
+            return self._read_jsonl(self.path)
+        return list(self._records)
+
+    def _next_seq(self, records: List[Dict[str, Any]]) -> int:
+        if not records:
+            return 1
+        return max(int(record.get("seq", 0)) for record in records) + 1
+
+    @staticmethod
+    def _coerce_version(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    # -- public API ------------------------------------------------------
+    def _versions_for(
+        self, records: List[Dict[str, Any]], draft_key: str
+    ) -> List[Dict[str, Any]]:
+        """Return the latest record per version for ``draft_key``, ascending."""
+        selected = [
+            record
+            for record in records
+            if record.get("draft_key") == draft_key
+        ]
+        latest: Dict[int, Dict[str, Any]] = {}
+        for record in sorted(selected, key=lambda item: item.get("seq", 0)):
+            latest[self._coerce_version(record.get("version"))] = record
+        return [latest[version] for version in sorted(latest)]
+
+    def append(
+        self,
+        draft_key: str,
+        draft_id: Optional[str],
+        payload: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Append one immutable version and return the stored record.
+
+        The next version is ``max(existing) + 1`` for this ``draft_key`` (or
+        ``1`` when it has no versions yet), so callers never have to track the
+        sequence themselves.
+        """
+        canonical = validate_draft_key(draft_key)
+        with self._lock:
+            records = self._read_all()
+            existing = [
+                record.get("version")
+                for record in records
+                if record.get("draft_key") == canonical
+            ]
+            version = next_version(existing)
+            stored_payload = dict(payload or {})
+            stored_payload["draft_key"] = canonical
+            stored_payload["version"] = version
+            record = {
+                "seq": self._next_seq(records),
+                "draft_key": canonical,
+                "version": version,
+                "draft_id": draft_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "payload": stored_payload,
+            }
+            if self.path:
+                self._append_jsonl(self.path, record)
+            else:
+                self._records.append(record)
+        return record
+
+    def list_versions(self, draft_key: str) -> List[Dict[str, Any]]:
+        """Return every version of ``draft_key`` in ascending order."""
+        canonical = validate_draft_key(draft_key)
+        with self._lock:
+            records = self._read_all()
+        return self._versions_for(records, canonical)
+
+    def get_version(
+        self, draft_key: str, version: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Return the record for ``(draft_key, version)`` or ``None``."""
+        canonical = validate_draft_key(draft_key)
+        target = self._coerce_version(version)
+        for record in self.list_versions(canonical):
+            if self._coerce_version(record.get("version")) == target:
+                return record
+        return None
+
+    def latest(self, draft_key: str) -> Optional[Dict[str, Any]]:
+        """Return the highest-versioned record of ``draft_key`` or ``None``."""
+        records = self.list_versions(draft_key)
+        return records[-1] if records else None

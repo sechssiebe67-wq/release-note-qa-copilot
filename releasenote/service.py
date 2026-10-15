@@ -27,7 +27,12 @@ from .profiles import (
 )
 from .qa import analyze_entries, checklist
 from .score import compute_score
-from .storage import ArchiveStore, DraftStore, ReviewStore
+from .storage import (
+    ArchiveStore,
+    DraftStore,
+    DraftVersionStore,
+    ReviewStore,
+)
 from .templates import (
     ReleaseTemplate,
     default_template,
@@ -36,6 +41,12 @@ from .templates import (
     template_summary,
 )
 from .trend import compute_trend
+from .versioning import (
+    diff_versions,
+    next_version,
+    rollback_plan,
+    validate_draft_key,
+)
 
 ConfigInput = Optional[Union[WorkspaceConfig, Dict[str, Any]]]
 
@@ -147,6 +158,8 @@ def build_draft(
     config: ConfigInput = None,
     profile: Optional[str] = None,
     template: Optional[Union[ReleaseTemplate, str, Dict[str, Any]]] = None,
+    draft_key: Optional[str] = None,
+    version_store: Optional[DraftVersionStore] = None,
 ) -> Dict[str, Any]:
     """Parse ``content`` and return draft, groups and QA data.
 
@@ -157,17 +170,170 @@ def build_draft(
     is an optional template name, object or :class:`ReleaseTemplate`; the
     resolved template is echoed back under ``template``.
 
+    When ``draft_key`` is supplied the draft is treated as a new version of a
+    logical draft: the canonical key is echoed back under ``draft_key`` and,
+    when a ``version_store`` is given, the next version is assigned and echoed
+    back under ``version``. The record itself is appended by the caller once
+    the ``draft_id`` is known (see :func:`store_draft_version`), so this
+    function stays free of write side effects.
+
     Raises :class:`releasenote.importer.ParseError` for invalid input,
-    :class:`ValueError` for an invalid config or template and
+    :class:`ValueError` for an invalid config, template or draft key and
     :class:`releasenote.templates.UnknownTemplateError` for an unknown template.
     """
     workspace = _coerce_config(config)
     resolved_template = _coerce_template(template)
     entries = parse_entries(content, fmt)
     qa = analyze_entries(entries, workspace, resolved_template)
-    return _assemble(
+    payload = _assemble(
         entries, qa, workspace, title, profile, resolved_template
     )
+    if draft_key is not None:
+        canonical = validate_draft_key(draft_key)
+        payload["draft_key"] = canonical
+        if version_store is not None:
+            existing = version_store.list_versions(canonical)
+            payload["version"] = next_version(
+                [record.get("version") for record in existing]
+            )
+    return payload
+
+
+def store_draft_version(
+    draft_key: str,
+    draft_id: Optional[str],
+    payload: Dict[str, Any],
+    version_store: Optional[DraftVersionStore] = None,
+) -> Dict[str, Any]:
+    """Append one immutable version of ``payload`` and return the record.
+
+    ``version_store`` must be durable history (``DATA_DIR`` set); otherwise
+    :class:`HistoryRequiredError` is raised so the API can answer HTTP 409.
+    The next version of ``draft_key`` is assigned by the store and echoed back
+    onto ``payload`` so the API response and the stored record agree.
+    """
+    if version_store is None:
+        raise HistoryRequiredError(
+            "draft versioning requires history; set DATA_DIR to enable it"
+        )
+    canonical = validate_draft_key(draft_key)
+    record = version_store.append(canonical, draft_id, payload)
+    payload["draft_key"] = canonical
+    payload["version"] = record.get("version")
+    return record
+
+
+def list_draft_versions(
+    draft_key: str, version_store: Optional[DraftVersionStore] = None
+) -> Dict[str, Any]:
+    """Return the version listing for ``draft_key`` in ascending order.
+
+    The result is ``{"draft_key": ..., "versions": [{version, draft_id,
+    created_at}]}``. An unknown key yields an empty list. Raises
+    :class:`HistoryRequiredError` when history is disabled and
+    :class:`ValueError` for a malformed key.
+    """
+    if version_store is None:
+        raise HistoryRequiredError(
+            "draft versioning requires history; set DATA_DIR to enable it"
+        )
+    canonical = validate_draft_key(draft_key)
+    records = version_store.list_versions(canonical)
+    return {
+        "draft_key": canonical,
+        "versions": [
+            {
+                "version": record.get("version"),
+                "draft_id": record.get("draft_id"),
+                "created_at": record.get("created_at"),
+            }
+            for record in records
+        ],
+    }
+
+
+def _coerce_version(version: Any) -> int:
+    """Return an integer version or raise :class:`ValueError`."""
+    if isinstance(version, bool):
+        raise ValueError("version must be an integer: {!r}".format(version))
+    try:
+        return int(version)
+    except (TypeError, ValueError):
+        raise ValueError("version must be an integer: {!r}".format(version))
+
+
+def get_draft_version(
+    draft_key: str,
+    version: Any,
+    version_store: Optional[DraftVersionStore] = None,
+) -> Dict[str, Any]:
+    """Return the stored payload for one version.
+
+    Raises :class:`HistoryRequiredError` when history is disabled,
+    :class:`ValueError` for a malformed key or version and :class:`LookupError`
+    for an unknown version.
+    """
+    if version_store is None:
+        raise HistoryRequiredError(
+            "draft versioning requires history; set DATA_DIR to enable it"
+        )
+    canonical = validate_draft_key(draft_key)
+    target = _coerce_version(version)
+    record = version_store.get_version(canonical, target)
+    if record is None:
+        raise LookupError("unknown version: {}".format(version))
+    return record.get("payload") or {}
+
+
+def diff_draft_versions(
+    draft_key: str,
+    previous_version: Any,
+    current_version: Any,
+    config: ConfigInput = None,
+    version_store: Optional[DraftVersionStore] = None,
+) -> Dict[str, Any]:
+    """Diff two stored versions of ``draft_key``.
+
+    Reuses :func:`releasenote.versioning.diff_versions` (and therefore
+    :func:`releasenote.diff.compute_diff`) on the two versions' stored entries
+    and returns ``{previous_version, current_version, diff, flags}``. Raises
+    :class:`HistoryRequiredError` when history is disabled,
+    :class:`ValueError` for malformed input and :class:`LookupError` for an
+    unknown version.
+    """
+    previous = get_draft_version(draft_key, previous_version, version_store)
+    current = get_draft_version(draft_key, current_version, version_store)
+    return diff_versions(previous, current, config)
+
+
+def rollback_draft_version(
+    draft_key: str,
+    version: Any,
+    version_store: Optional[DraftVersionStore] = None,
+) -> Dict[str, Any]:
+    """Return the target version's payload with ``rolled_back_from`` set.
+
+    ``rolled_back_from`` is the previously latest version of the draft, so a
+    caller can show what the rollback moved away from. Raises
+    :class:`HistoryRequiredError` when history is disabled, :class:`ValueError`
+    for a malformed key or version and :class:`LookupError` when the version
+    does not exist.
+    """
+    if version_store is None:
+        raise HistoryRequiredError(
+            "draft versioning requires history; set DATA_DIR to enable it"
+        )
+    canonical = validate_draft_key(draft_key)
+    target_version = _coerce_version(version)
+    records = version_store.list_versions(canonical)
+    try:
+        target = rollback_plan(records, target_version)
+    except ValueError as exc:
+        raise LookupError(str(exc))
+    payload = dict(target.get("payload") or {})
+    latest = records[-1] if records else None
+    payload["rolled_back_from"] = latest.get("version") if latest else None
+    return payload
 
 
 def build_diff(

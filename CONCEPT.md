@@ -50,7 +50,8 @@ The MVP is a dependency-free Python web application:
 | Profile comparison | QA-check one changelog under every built-in rule profile (plus an optional inline config layered on top): per-profile metrics, a delta against the baseline and a deterministic recommended profile; export as CSV/JSON |
 | Release readiness score | A single, explainable 0–100 score per draft with a `ready`/`review`/`risky` band and an optional gate policy (`min_score`, `max_high`) that yields a deterministic `pass`/`fail` ship decision; export as CSV/JSON |
 | Draft archive | Search and filter stored drafts (`q` on draft/entry titles, `tag`, `status`, `band`, `since`/`until`, `limit`/`offset`) and organise them with free-form tags kept in an append-only `archive.jsonl` log (latest action per draft/tag wins); per-draft tag audit trail and CSV/JSON export; requires `DATA_DIR` |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/archive/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/export/archive.csv`, `GET /api/export/archive.json`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/archive/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles`, `POST /api/archive/tag` |
+| Draft versioning | Immutable, ordered versions per logical draft (`draft_key`): regenerating with the same key appends versions `1`, `2`, … to an append-only `versions.jsonl` log; list versions, diff two versions (reusing the diff machinery) and roll back to any version with `rolled_back_from`; CSV/JSON export; requires `DATA_DIR` |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/archive/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/export/archive.csv`, `GET /api/export/archive.json`, `GET /api/export/versions.csv`, `GET /api/export/versions.json`, `GET /api/export/version-diff.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/archive/<id>`, `GET /api/versions/<draft_key>`, `GET /api/versions/<draft_key>/<version>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles`, `POST /api/archive/tag`, `POST /api/versions/diff`, `POST /api/versions/rollback` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
@@ -80,7 +81,12 @@ comparison CSV* / *Download profile comparison JSON*. An *Archive* section
 searches stored drafts, filters them by tag, review status and score band, lists
 per-row *Open share page* and tag add/remove controls, and offers *Download
 archive CSV* / *Download archive JSON*; it is hidden with a `DATA_DIR` hint when
-history is disabled.
+history is disabled. A *Draft key* input next to the generate controls makes a
+draft versioned; after a successful generate with a key a *Versions* panel lists
+each version with *View*, *Diff against latest* and *Roll back* actions plus
+*Download versions CSV* / *Download versions JSON* (and *Download version diff
+CSV* after a diff), and the panel is hidden with a `DATA_DIR` hint when history
+is disabled.
 
 ## Architecture
 
@@ -99,12 +105,13 @@ releasenote/
   profile_compare.py  one changelog across rule profiles: metrics, delta, recommendation
   score.py      deterministic release readiness score, band and gate policy evaluation
   archive.py    pure tag validation + archive listing filter/pagination
+  versioning.py pure draft-key validation + version numbering, ordering, diff and rollback
   generator.py  Markdown rendering with inline QA annotations and a template layout
-  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, score, template, trend, comparison, profile comparison, archive and full payload
-  service.py    parse -> group -> qa -> score -> render pipeline (+ build_diff, build_trend, build_comparison, build_profile_comparison, build_archive, tag_draft, reviews, shared drafts)
-  storage.py    optional append-only draft history + review/audit store + archive tag log
+  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, score, template, trend, comparison, profile comparison, archive, versions and full payload
+  service.py    parse -> group -> qa -> score -> render pipeline (+ build_diff, build_trend, build_comparison, build_profile_comparison, build_archive, tag_draft, reviews, shared drafts, draft versioning)
+  storage.py    optional append-only draft history + review/audit store + archive tag log + version log
   server.py     stdlib HTTP server + JSON API + read-only share pages
-  static/       single-page browser UI (draft, diff, review controls, archive, share link)
+  static/       single-page browser UI (draft, diff, review controls, archive, versions, share link)
 tests/          offline unit tests (no network)
 Dockerfile      non-root, read-only-friendly image
 deploy/helm/    one chart exposing image digest, ingress, probes, PVC
@@ -884,6 +891,77 @@ per-release-set dashboards, retention/archival policies and (with the approved
 review state as an anchor) a replayable release history that spans multiple
 years without a database.
 
+## Draft versioning
+
+**Goal.** The Copilot stores generated drafts as flat history entries keyed by
+`draft_id`, and the review log records transitions but not the content that was
+approved. There was no way to track how a draft evolved through edits, compare
+successive versions of the same draft, or roll back to a previously approved
+version — an incomplete audit trail. **Draft versioning** makes every
+regeneration of a logical draft append an **immutable, ordered version**, so a
+release team can list versions, diff any two of them and roll back to a chosen
+one.
+
+**Intended users.** Release managers who need to know exactly what was approved
+and to reproduce or undo a change, and reviewers/approvers who must compare a
+revised draft against the version they signed off.
+
+**Relation to history, diff and share.** Versioning layers on top of the same
+`DATA_DIR` history the archive and share links use. The comparison logic is not
+reimplemented: `releasenote.versioning.diff_versions` calls the existing
+`releasenote.diff.compute_diff` on the two versions' stored `entries`, so a
+version diff reports exactly the same six categories as `POST /api/diff`. When
+`DATA_DIR` is unset, or no `draft_key` is supplied, the product degrades to the
+current single-version behaviour and the versioning endpoints answer HTTP 409.
+
+**The version log.** `releasenote.storage.DraftVersionStore` appends one JSON
+object per version to `<DATA_DIR>/versions.jsonl` carrying a monotonically
+increasing `seq`, the canonical `draft_key`, the integer `version`, the
+`draft_id` of the stored draft, an ISO-8601 UTC `created_at` and the full
+`payload`. The **latest line per `(draft_key, version)`** wins when reading, so
+the log is append-only and the full version history stays recoverable. Without
+`DATA_DIR` the store falls back to an in-memory list and `is_durable` is
+`False`.
+
+**Pure helpers.** `releasenote.versioning` is dependency-free and unit-tested:
+
+| Helper | Behaviour |
+| --- | --- |
+| `validate_draft_key(key)` | Returns the trimmed canonical key; requires a non-empty `[a-z0-9][a-z0-9._-]*` slug of at most 64 characters, else `ValueError`. |
+| `next_version(existing_versions)` | `1` when there are none, otherwise `max + 1`. |
+| `sort_versions(records)` | Records ordered by `version` ascending, stable on ties. |
+| `diff_versions(previous, current, config=None)` | Reuses `compute_diff` on the stored `entries` and returns `{previous_version, current_version, diff, flags}`. |
+| `rollback_plan(records, target_version)` | The record for `target_version` or `ValueError` when it does not exist. |
+
+**Endpoints.**
+
+| Endpoint | Body / query | Response |
+| --- | --- | --- |
+| `GET /api/versions/<draft_key>` | — | `{draft_key, versions: [{version, draft_id, created_at}]}` in ascending order (empty list for an unknown key). |
+| `GET /api/versions/<draft_key>/<version>` | — | The stored version payload. |
+| `POST /api/versions/diff` | `{"draft_key", "previous_version", "current_version", "config"?}` | `{previous_version, current_version, diff, flags}` with the same six diff categories as `POST /api/diff`. |
+| `POST /api/versions/rollback` | `{"draft_key", "version"}` | The target version's payload with `rolled_back_from` set to the previously latest version. |
+| `GET /api/export/versions.csv` | `draft_key` | `text/csv` with the header `version,draft_id,created_at`, one row per version. |
+| `GET /api/export/versions.json` | `draft_key` | The version listing as stable UTF-8 JSON. |
+| `GET /api/export/version-diff.csv` | `draft_key`, `previous_version`, `current_version` | The diff rows with the leading header `version,category,id,title,type,reason`. |
+
+A malformed key or body is HTTP 400, an unknown version is HTTP 404 and an
+unset history store is HTTP 409 naming `DATA_DIR`. The exports answer with a
+`Content-Disposition: attachment` header. The server reuses the existing 2 MiB
+body cap and JSON-object validation helpers and adds no dependency.
+
+**Browser UI.** A *Draft key* input next to the generate controls (optional)
+makes a draft versioned. After a successful generate with a key, a *Versions*
+panel lists each version with *View*, *Diff against latest* and *Roll back*
+actions and offers *Download versions CSV* / *Download versions JSON*, plus
+*Download version diff CSV* after a diff. Those downloads are built in the
+browser from the payload already on screen. When `DATA_DIR` is unset the panel
+is hidden behind a hint.
+
+**Next direction.** Per-version review status (approve a specific version rather
+than the whole draft), named/annotated versions and version-aware share links,
+building on the immutable log without a database.
+
 ## Deployment contract
 
 - Docker image builds for `linux/amd64` and `linux/arm64`, serves HTTP on port
@@ -920,6 +998,9 @@ years without a database.
 - Saved archive filter views and per-release-set dashboards — the archive
   search/filter and append-only tag log landed in **v0.13.0**; saved views are
   still open.
+- Per-version review status, named/annotated versions and version-aware share
+  links — immutable draft versioning with list/diff/rollback landed in
+  **v0.14.0**; per-version review state is still open.
 
 Per-workspace term and tone rules (was the first item in this list) landed in
 **v0.2.0** — see [Workspace configuration](#workspace-configuration).
@@ -950,6 +1031,8 @@ The release readiness score with explainable penalties and an optional
 [Release readiness score](#release-readiness-score).
 The draft archive with search, filters and an append-only tag log landed in
 **v0.13.0** — see [Draft archive](#draft-archive).
+Immutable draft versioning with list/diff/rollback and CSV/JSON export landed in
+**v0.14.0** — see [Draft versioning](#draft-versioning).
 
 ## Success signals
 
