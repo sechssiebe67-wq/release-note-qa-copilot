@@ -47,7 +47,8 @@ The MVP is a dependency-free Python web application:
 | Release-note templates | Named built-in (`default`, `github-release`, `email`) or inline templates control section order, an optional intro/outro and required sections; the resolved template is echoed in the payload and the rule summary, and a required-but-empty section raises `missing_template_section` |
 | Trend analysis | Analyse 2–20 ordered releases: per-release QA counts, publishability, sourced-entry ratio, vague/banned hits, consecutive deltas (`improving` / `stable` / `regressing`) and an overall verdict; render a table with SVG sparklines and export as CSV/JSON |
 | Draft comparison | Compare 2–10 complete draft payloads: per-draft QA metrics, a per-entry presence matrix (`identical` / `changed` / `unique`), a shared/unique breakdown and a deterministic publishability recommendation; export as CSV/JSON |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare` |
+| Profile comparison | QA-check one changelog under every built-in rule profile (plus an optional inline config layered on top): per-profile metrics, a delta against the baseline and a deterministic recommended profile; export as CSV/JSON |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
@@ -67,7 +68,11 @@ total flag count and sourced ratio and a verdict badge per delta, and exposes
 *Compare* section accepts 2–10 drafts (one per block, same shape as the trend
 input), renders the per-draft metrics, the entry presence matrix, the
 shared/unique breakdown and a recommendation badge, and exposes *Download
-comparison CSV* / *Download comparison JSON* / *Download matrix CSV*.
+comparison CSV* / *Download comparison JSON* / *Download matrix CSV*. A
+*Compare profiles* section takes a single changelog, lets the reviewer tick the
+profiles to compare (all built-ins by default) and renders a per-profile metrics
+table with the recommended profile highlighted plus *Download profile
+comparison CSV* / *Download profile comparison JSON*.
 
 ## Architecture
 
@@ -83,9 +88,10 @@ releasenote/
   diff.py       compare two drafts: classification, repeated claims, regressions
   trend.py      multi-release trend analysis: metrics, deltas, verdicts
   compare.py    draft comparison matrix: metrics, presence, shared/unique, recommendation
+  profile_compare.py  one changelog across rule profiles: metrics, delta, recommendation
   generator.py  Markdown rendering with inline QA annotations and a template layout
-  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, template, trend, comparison and full payload
-  service.py    parse -> group -> qa -> render pipeline (+ build_diff, build_trend, build_comparison, reviews, shared drafts)
+  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, template, trend, comparison, profile comparison and full payload
+  service.py    parse -> group -> qa -> render pipeline (+ build_diff, build_trend, build_comparison, build_profile_comparison, reviews, shared drafts)
   storage.py    optional append-only draft history + review/audit store
   server.py     stdlib HTTP server + JSON API + read-only share pages
   static/       single-page browser UI (draft, diff, review controls, share link)
@@ -504,6 +510,85 @@ payload. The feature ships in **v0.9.0** (Python package and Helm chart). No new
 third-party dependency is introduced; the standard library is still the only
 requirement.
 
+## Profile comparison
+
+**Goal.** A reviewer can already attach a named QA rule profile (v0.6.0) to a
+draft, but there is no way to see how the **same** changelog would score under
+**every** profile side by side. Choosing a profile is therefore guesswork: a
+reviewer cannot tell whether a draft is clean because the entries are good or
+because the profile was lenient, and cannot justify *why* one profile is the
+right one to adopt. Profile comparison makes the effect of a rule profile
+explicit and comparable.
+
+**Intended users.** Release managers choosing a team-wide profile, and
+reviewers who need to justify a sign-off by showing the same changelog under
+several rule sets.
+
+**Current capabilities.** `releasenote.profile_compare.compare_profiles`
+parses the content **once** with `importer.parse_entries`, then for each
+requested profile (default: all built-ins from `BUILTIN_PROFILES`, in a stable
+order) resolves the effective config with
+`resolve_config({"profile": name, "config": config})` and runs
+`analyze_entries`. It returns a JSON-serialisable mapping:
+
+```json
+{
+  "baseline": "marketing-safe",
+  "profiles": [
+    {"name": "marketing-safe", "description": "…", "entry_count": 1,
+     "counts": {"high": 0, "medium": 1, "low": 0, "total": 1},
+     "publishable": true, "sourced_ratio": 1.0,
+     "vague_hits": 0, "banned_hits": 1,
+     "flag_counts": {"banned_phrase": 1},
+     "flag_severities": {"banned_phrase": "medium"},
+     "delta": {"high": 0, "total": 0, "sourced_ratio": 0.0}}
+  ],
+  "recommendation": {"profile": "internal", "reason": "…"}
+}
+```
+
+The first requested profile is the `baseline`; every row carries a `delta` of
+its `high`, `total` and `sourced_ratio` against it. An unknown requested profile
+raises `UnknownProfileError`, a non-list `profiles` value raises `ValueError`
+and unparseable content raises `ParseError`.
+
+**Recommendation rule (deterministic).** The recommended profile has the
+fewest `high` flags, then the fewest `total` flags, then the highest
+`sourced_ratio`; ties fall back to input order. The `reason` names the winning
+`high`, `total` and `sourced_ratio` values, mirroring
+`releasenote.compare._recommend`.
+
+**Endpoints.**
+
+| Endpoint | Body / query | Response |
+| --- | --- | --- |
+| `POST /api/compare-profiles` | `{"format", "content", "profiles"?, "config"?}` | The full report. |
+| `GET /api/compare-profiles/sample` | — | A valid one-changelog example payload that `POST /api/compare-profiles` accepts unchanged. |
+| `GET /api/export/profile-comparison.csv` | `format`, `content`, optional repeated `profile`, optional inline `config` (JSON) | `text/csv` with the header `profile,entry_count,high,medium,low,total,publishable,sourced_ratio,vague_hits,banned_hits`, one row per profile. |
+| `GET /api/export/profile-comparison.json` | same as `profile-comparison.csv` | The full report as stable JSON (sorted keys, UTF-8, no `NaN`). |
+
+The endpoints reuse the existing 2 MiB body cap and JSON-object validation:
+malformed JSON, a missing `content`, a non-list `profiles` value or an invalid
+`config` returns HTTP 400, an unknown profile returns HTTP 400 naming it and
+stores no draft, an over-limit body returns HTTP 413, and unparseable content
+returns HTTP 422. The CSV export uses `\n` line endings and quotes fields
+containing commas, quotes or newlines so it round-trips through `csv.reader`.
+
+**Browser UI.** A *Compare profiles* section takes a single changelog (prefilled
+from the sample), a checkbox list of profiles from `GET /api/profiles`, a
+*Compare profiles* button, a per-profile results table with the recommended
+profile highlighted, and *Download profile comparison CSV* / *Download profile
+comparison JSON* buttons built in the browser from the payload. No external
+network request is made by the page. The feature ships in **v0.11.0** (Python
+package and Helm chart). No new third-party dependency is introduced; the
+standard library is still the only requirement.
+
+**Next direction.** Profile comparison opens the door to saving the chosen
+profile per workspace, pinning a profile version to a signed-off draft (so a
+past sign-off can be replayed against the rules that were live then) and
+org-wide profile libraries. The read-only comparison already gives reviewers the
+evidence; server-side persistence and versioning are the next step.
+
 ## Release-note templates
 
 **Goal.** The Copilot has always rendered a **fixed** Markdown skeleton: a
@@ -683,6 +768,9 @@ recommendation landed in **v0.9.0** — see
 Release-note templates with section ordering, intro/outro and a
 `missing_template_section` flag landed in **v0.10.0** — see
 [Release-note templates](#release-note-templates).
+Side-by-side QA rule profile comparison with per-profile deltas and a
+deterministic recommended profile landed in **v0.11.0** — see
+[Profile comparison](#profile-comparison).
 
 ## Success signals
 

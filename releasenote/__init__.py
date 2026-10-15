@@ -46,6 +46,7 @@ from .generator import render_markdown, render_qa_checklist
 from .diff import diff_drafts, compute_diff
 from .trend import compute_trend
 from .compare import compute_comparison
+from .profile_compare import compare_profiles
 from .exporters import (
     checklist_csv,
     comparison_csv,
@@ -53,6 +54,8 @@ from .exporters import (
     comparison_matrix_csv,
     diff_csv,
     draft_json,
+    profile_comparison_csv,
+    profile_comparison_json,
     qa_flags_csv,
     rules_csv,
     rules_json,
@@ -65,6 +68,7 @@ from .storage import DraftStore, ReviewStore
 from .service import (
     HistoryRequiredError,
     build_comparison,
+    build_profile_comparison,
     build_trend,
     get_review,
     get_shared_draft,
@@ -116,6 +120,8 @@ __all__ = [
     "build_trend",
     "compute_comparison",
     "build_comparison",
+    "compare_profiles",
+    "build_profile_comparison",
     "qa_flags_csv",
     "checklist_csv",
     "diff_csv",
@@ -129,6 +135,8 @@ __all__ = [
     "comparison_csv",
     "comparison_matrix_csv",
     "comparison_json",
+    "profile_comparison_csv",
+    "profile_comparison_json",
     "DraftStore",
     "ReviewStore",
     "record_review",
@@ -137,4 +145,4 @@ __all__ = [
     "HistoryRequiredError",
 ]
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"

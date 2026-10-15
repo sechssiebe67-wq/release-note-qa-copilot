@@ -298,6 +298,30 @@
       </div>
     </section>
 
+    <section style="grid-column: 1 / -1;" id="profileCompareSection">
+      <label>Compare profiles</label>
+      <p class="muted">See how the same changelog scores under every QA rule profile. Tick the profiles to compare (all are ticked by default) and optionally tailor the workspace rules above, which are layered on top of each profile.</p>
+      <div>
+        <label>Profiles</label>
+        <div id="profileCompareNames" class="summary"></div>
+      </div>
+      <label for="profileCompareContent">Changelog / ticket data</label>
+      <textarea id="profileCompareContent" class="small" spellcheck="false" placeholder="id,type,title,description,benefit,source&#10;REL-1,feature,Bulk export,Export all reports in one click,A much better experience,&#10;REL-2,fix,Timezone fix,Timestamps render in local time,Correct local times,REL-2"></textarea>
+      <div class="row" style="margin-top:.4rem">
+        <button id="runProfileCompare" type="button">Compare profiles</button>
+        <button id="loadProfileCompareSample" class="secondary" type="button">Load profile sample</button>
+      </div>
+      <div class="status" id="profileCompareStatus"></div>
+      <div id="profileCompareResults" hidden>
+        <div class="summary" id="profileCompareSummary"></div>
+        <div id="profileCompareTable"></div>
+        <div class="row" style="margin-top:.6rem" id="profileCompareExports">
+          <button id="downloadProfileCsv" class="secondary" type="button">Download profile comparison CSV</button>
+          <button id="downloadProfileJson" class="secondary" type="button">Download profile comparison JSON</button>
+        </div>
+      </div>
+    </section>
+
     <section style="grid-column: 1 / -1;" id="reviewHint" hidden>
       <label>Review</label>
       <p class="muted">Approve, reject or reset a draft and keep an audit trail. Set <code>DATA_DIR</code> when starting the server so drafts get an id and reviews are persisted durably.</p>
@@ -361,6 +385,7 @@
     let profilesByName = {};
     let lastTrend = null;
     let lastComparison = null;
+    let lastProfileComparison = null;
 
     async function api(path, options) {
       const res = await fetch(path, options);
@@ -515,6 +540,7 @@
       try {
         const data = await api("/api/profiles");
         const select = $("profile");
+        const checkboxes = $("profileCompareNames");
         (data.profiles || []).forEach(profile => {
           profilesByName[profile.name] = profile;
           const option = document.createElement("option");
@@ -523,6 +549,23 @@
             ? profile.name + " — " + profile.description
             : profile.name;
           select.appendChild(option);
+          if (checkboxes) {
+            const label = document.createElement("label");
+            label.className = "pill";
+            label.style.display = "inline-flex";
+            label.style.alignItems = "center";
+            label.style.cursor = "pointer";
+            const box = document.createElement("input");
+            box.type = "checkbox";
+            box.value = profile.name;
+            box.checked = true;
+            box.setAttribute("data-compare-profile", "");
+            box.style.width = "auto";
+            box.style.marginRight = ".35rem";
+            label.appendChild(box);
+            label.appendChild(document.createTextNode(profile.name));
+            checkboxes.appendChild(label);
+          }
         });
       } catch (err) {
         // The selector simply stays at "(none)" if profiles are unavailable.
@@ -1092,6 +1135,120 @@
       saveBlob("draft-comparison-matrix.csv", buildComparisonMatrixCsv(lastComparison), "text/csv");
     }
 
+    function selectedProfileNames() {
+      const names = [];
+      document.querySelectorAll("[data-compare-profile]").forEach(box => {
+        if (box.checked) names.push(box.value);
+      });
+      return names;
+    }
+
+    function renderProfileComparison(report) {
+      const rows = report.profiles || [];
+      const recommendation = report.recommendation || {};
+      const recommended = recommendation.profile;
+      $("profileCompareSummary").innerHTML =
+        '<span class="pill pass">recommended: ' + esc(recommended) + '</span>' +
+        '<span class="pill">baseline: ' + esc(report.baseline) + '</span>' +
+        '<span class="muted">' + esc(recommendation.reason) + '</span>';
+
+      const header = "<tr><th>Profile</th><th>Entries</th><th>High</th><th>Med</th>" +
+        "<th>Low</th><th>Total</th><th>Publishable</th><th>Sourced</th>" +
+        "<th>Vague</th><th>Banned</th><th>Δhigh</th><th>Δtotal</th></tr>";
+      const body = rows.map(row => {
+        const delta = row.delta || {};
+        const isRecommended = row.name === recommended;
+        const nameCell = isRecommended
+          ? '<span class="pill pass">' + esc(row.name) + '</span>'
+          : esc(row.name);
+        return "<tr>" +
+          "<td>" + nameCell + "</td>" +
+          "<td>" + esc(row.entry_count) + "</td>" +
+          "<td>" + esc(row.counts.high) + "</td>" +
+          "<td>" + esc(row.counts.medium) + "</td>" +
+          "<td>" + esc(row.counts.low) + "</td>" +
+          "<td>" + esc(row.counts.total) + "</td>" +
+          '<td><span class="pill ' + (row.publishable ? "pass" : "high") + '">' + (row.publishable ? "yes" : "no") + '</span></td>' +
+          "<td>" + esc(Math.round(row.sourced_ratio * 100) + "%") + "</td>" +
+          "<td>" + esc(row.vague_hits) + "</td>" +
+          "<td>" + esc(row.banned_hits) + "</td>" +
+          "<td>" + esc(delta.high) + "</td>" +
+          "<td>" + esc(delta.total) + "</td>" +
+        "</tr>";
+      }).join("");
+      $("profileCompareTable").innerHTML =
+        '<table class="trend"><thead>' + header + '</thead><tbody>' + body + '</tbody></table>';
+    }
+
+    async function loadProfileCompareSample() {
+      try {
+        const data = await api("/api/compare-profiles/sample");
+        $("profileCompareContent").value = data.content || "";
+        $("profileCompareStatus").textContent = "Profile sample loaded.";
+      } catch (err) {
+        $("profileCompareStatus").textContent = "Error: " + err.message;
+      }
+    }
+
+    async function runProfileCompare() {
+      const content = $("profileCompareContent").value;
+      if (!content.trim()) {
+        $("profileCompareStatus").textContent = "Paste some data first.";
+        return;
+      }
+      $("runProfileCompare").disabled = true;
+      $("profileCompareStatus").textContent = "Comparing profiles…";
+      const names = selectedProfileNames();
+      const body = { content: content, format: "auto" };
+      if (names.length) body.profiles = names;
+      const config = collectConfig();
+      if (Object.keys(config).length) body.config = config;
+      try {
+        const report = await api("/api/compare-profiles", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        lastProfileComparison = report;
+        renderProfileComparison(report);
+        $("profileCompareResults").hidden = false;
+        $("profileCompareStatus").textContent = "Comparison ready.";
+      } catch (err) {
+        lastProfileComparison = null;
+        $("profileCompareResults").hidden = true;
+        $("profileCompareStatus").textContent = "Error: " + err.message;
+      } finally {
+        $("runProfileCompare").disabled = false;
+      }
+    }
+
+    function buildProfileComparisonCsv(report) {
+      const header = ["profile", "entry_count", "high", "medium", "low", "total",
+        "publishable", "sourced_ratio", "vague_hits", "banned_hits"];
+      const rows = (report.profiles || []).map(p =>
+        [p.name, p.entry_count, p.counts.high, p.counts.medium, p.counts.low,
+         p.counts.total, pyBool(p.publishable), pyFloat(p.sourced_ratio),
+         p.vague_hits, p.banned_hits]
+      );
+      return buildCsv(header, rows);
+    }
+
+    function buildProfileComparisonJson(report) {
+      return stableJson(report, null);
+    }
+
+    function downloadProfileComparisonCsv() {
+      if (!lastProfileComparison) return;
+      saveBlob("profile-comparison.csv",
+        buildProfileComparisonCsv(lastProfileComparison), "text/csv");
+    }
+
+    function downloadProfileComparisonJson() {
+      if (!lastProfileComparison) return;
+      saveBlob("profile-comparison.json",
+        buildProfileComparisonJson(lastProfileComparison), "application/json");
+    }
+
     function download() {
       if (!lastMarkdown) { $("status").textContent = "Generate a draft first."; return; }
       const blob = new Blob([lastMarkdown], { type: "text/markdown" });
@@ -1224,6 +1381,10 @@
     $("downloadComparisonCsv").addEventListener("click", downloadComparisonCsv);
     $("downloadComparisonJson").addEventListener("click", downloadComparisonJson);
     $("downloadComparisonMatrixCsv").addEventListener("click", downloadComparisonMatrixCsv);
+    $("runProfileCompare").addEventListener("click", runProfileCompare);
+    $("loadProfileCompareSample").addEventListener("click", loadProfileCompareSample);
+    $("downloadProfileCsv").addEventListener("click", downloadProfileComparisonCsv);
+    $("downloadProfileJson").addEventListener("click", downloadProfileComparisonJson);
     $("profile").addEventListener("change", () => {
       const name = $("profile").value;
       if (!name) {
@@ -1240,6 +1401,7 @@
     loadHistory();
     loadProfiles();
     loadTemplates();
+    loadProfileCompareSample();
   </script>
 </body>
 </html>

@@ -23,6 +23,8 @@ from .exporters import (
     comparison_matrix_csv,
     diff_csv,
     draft_json,
+    profile_comparison_csv,
+    profile_comparison_json,
     qa_flags_csv,
     rules_csv,
     rules_json,
@@ -49,12 +51,14 @@ from .service import (
     build_comparison,
     build_diff,
     build_draft,
+    build_profile_comparison,
     build_trend,
     get_review,
     get_shared_draft,
     record_review,
     sample,
     sample_comparison,
+    sample_profile_comparison,
     sample_trend,
     sample_workspace_config,
 )
@@ -102,6 +106,18 @@ _COMPARE_EXPORTS = {
     "/api/export/comparison-matrix.csv": (
         "text/csv",
         "draft-comparison-matrix.csv",
+    ),
+}
+# Profile-comparison exports built from ``format``/``content`` plus an optional
+# repeated ``profile`` and inline ``config`` query parameter.
+_PROFILE_EXPORTS = {
+    "/api/export/profile-comparison.csv": (
+        "text/csv",
+        "profile-comparison.csv",
+    ),
+    "/api/export/profile-comparison.json": (
+        "application/json; charset=utf-8",
+        "profile-comparison.json",
     ),
 }
 _FORMATS = ("auto", "csv", "json")
@@ -333,6 +349,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/compare/sample":
             self._send_json(200, sample_comparison())
             return
+        if path == "/api/compare-profiles/sample":
+            self._send_json(200, sample_profile_comparison())
+            return
         if path == "/api/history":
             store = getattr(self.server, "store", None)
             query = parse_qs(parsed.query)
@@ -366,6 +385,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._shared_draft(draft_id, json_errors=True)
             if payload is not None:
                 self._send_json(200, payload)
+            return
+        if path in _PROFILE_EXPORTS:
+            self._handle_profile_export(path, parsed)
             return
         if path in _TREND_EXPORTS:
             self._handle_trend_export(path, parsed)
@@ -476,6 +498,61 @@ class Handler(BaseHTTPRequestHandler):
         else:
             body = comparison_json(report)
         content_type, filename = _COMPARE_EXPORTS[path]
+        self._send(
+            200,
+            body.encode("utf-8"),
+            content_type,
+            {"Content-Disposition": 'attachment; filename="{}"'.format(filename)},
+        )
+
+    def _handle_profile_export(self, path: str, parsed: Any) -> None:
+        """Serve a profile-comparison CSV/JSON export from query parameters.
+
+        ``format`` and ``content`` are required; optional repeated ``profile``
+        parameters name the profiles to compare (default: every built-in) and
+        an optional ``config`` query parameter is inline JSON layered on top of
+        each profile. Missing or invalid parameters return 400, an unknown
+        profile returns 400 naming it and unparseable content returns 422.
+        """
+        query = parse_qs(parsed.query)
+        fmt = _first(query, "format", "auto")
+        if fmt not in _FORMATS:
+            self._send_json(400, {"error": "unsupported format: {!r}".format(fmt)})
+            return
+        content = _first(query, "content")
+        if not content or not content.strip():
+            self._send_json(400, {"error": "query 'content' is required"})
+            return
+        payload: Dict[str, Any] = {"content": content, "format": fmt}
+        profiles = query.get("profile")
+        if profiles:
+            payload["profiles"] = profiles
+        config_raw = _first(query, "config")
+        if config_raw:
+            try:
+                payload["config"] = json.loads(config_raw)
+            except json.JSONDecodeError:
+                self._send_json(
+                    400, {"error": "query 'config' must be valid JSON"}
+                )
+                return
+        try:
+            report = build_profile_comparison(payload)
+        except UnknownProfileError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        body = (
+            profile_comparison_csv(report)
+            if path.endswith(".csv")
+            else profile_comparison_json(report)
+        )
+        content_type, filename = _PROFILE_EXPORTS[path]
         self._send(
             200,
             body.encode("utf-8"),
@@ -715,6 +792,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/review",
             "/api/trend",
             "/api/compare",
+            "/api/compare-profiles",
         ):
             self._send_json(404, {"error": "not found", "path": parsed.path})
             return
@@ -729,6 +807,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/compare":
             self._post_compare(payload)
+            return
+        if path == "/api/compare-profiles":
+            self._post_compare_profiles(payload)
             return
         resolved = self._resolve_request(payload)
         if resolved is None:
@@ -791,6 +872,20 @@ class Handler(BaseHTTPRequestHandler):
     def _post_compare(self, payload: Dict[str, Any]) -> None:
         try:
             result = build_comparison(payload)
+        except UnknownProfileError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        self._send_json(200, result)
+
+    def _post_compare_profiles(self, payload: Dict[str, Any]) -> None:
+        try:
+            result = build_profile_comparison(payload)
         except UnknownProfileError as exc:
             self._send_json(400, {"error": str(exc)})
             return

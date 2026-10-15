@@ -18,6 +18,7 @@ from .models import (
     QAResult,
     ReviewRecord,
 )
+from .profile_compare import compare_profiles
 from .profiles import (
     normalize_profile_name,
     resolve_config,
@@ -251,6 +252,34 @@ def build_comparison(payload: Dict[str, Any]) -> Dict[str, Any]:
     return report
 
 
+def build_profile_comparison(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate ``payload`` and compare one changelog across rule profiles.
+
+    ``payload`` carries a ``content`` string plus the optional ``format``,
+    ``profiles`` (a list of profile names; default: every built-in) and
+    ``config`` (an inline workspace config layered on top of each profile).
+
+    Raises :class:`ValueError` for a malformed payload, a missing ``content``,
+    a non-list ``profiles`` value or an invalid config,
+    :class:`releasenote.profiles.UnknownProfileError` for an unknown profile
+    and :class:`releasenote.importer.ParseError` for unparseable content.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+    content = payload.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("field 'content' is required")
+    fmt = payload.get("format", "auto")
+    if not isinstance(fmt, str):
+        raise ValueError("'format' must be a string")
+    return compare_profiles(
+        content,
+        fmt,
+        payload.get("profiles"),
+        payload.get("config"),
+    )
+
+
 def sample(fmt: str = "csv") -> Dict[str, str]:
     """Return example content for the UI and API."""
     fmt = (fmt or "csv").strip().lower()
@@ -349,6 +378,25 @@ def sample_comparison() -> Dict[str, Any]:
                 ),
             },
         ]
+    }
+
+
+def sample_profile_comparison() -> Dict[str, Any]:
+    """Return a one-changelog example payload for ``GET /api/compare-profiles/sample``.
+
+    The changelog carries an unsourced benefit with a hype phrase so the
+    built-in ``strict``, ``marketing-safe`` and ``internal`` profiles score it
+    differently and the recommendation is not trivial.
+    """
+    return {
+        "format": "csv",
+        "content": (
+            "id,type,title,description,benefit,source\n"
+            "REL-1,feature,Bulk export,Export all reports in one click,"
+            "A much better experience,\n"
+            "REL-2,fix,Timezone fix,Timestamps render in local time,"
+            "Correct local times,REL-2\n"
+        ),
     }
 
 

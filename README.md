@@ -21,6 +21,9 @@ unsupported claims are flagged before publishing.
 - Compare **2–10 candidate drafts** side by side: per-draft QA metrics, a
   per-entry presence matrix (`identical` / `changed` / `unique`), a shared vs.
   unique breakdown and a deterministic publishability recommendation.
+- Compare the **same** changelog under every QA rule profile side by side: one
+  row per profile with its metrics and delta against a baseline, plus a
+  deterministic recommendation of the best profile to adopt.
 - Export Markdown for Confluence, GitHub Releases or e-mail, and the QA flags,
   checklist and diff as CSV / JSON for spreadsheets and tooling.
 - Hand a draft to a colleague with a read-only share link (`/s/<draft_id>`)
@@ -57,6 +60,7 @@ Configuration:
 | GET | `/api/templates` | Built-in release-note templates (`name`, `description`, `sections`, `intro`, `outro`) |
 | GET | `/api/trend/sample` | Example 3-release trend payload |
 | GET | `/api/compare/sample` | Example 2-draft comparison payload |
+| GET | `/api/compare-profiles/sample` | Example one-changelog profile-comparison payload |
 | GET | `/api/export/qa.csv` | QA flags as CSV (`entry_id,code,severity,message`) |
 | GET | `/api/export/checklist.csv` | QA checklist as CSV (`label,status,detail`) |
 | GET | `/api/export/diff.csv` | Release diff as CSV (`category,id,title,type,reason`) |
@@ -69,6 +73,8 @@ Configuration:
 | GET | `/api/export/comparison.csv` | Draft comparison per-draft metrics as CSV |
 | GET | `/api/export/comparison.json` | Full draft comparison report as JSON |
 | GET | `/api/export/comparison-matrix.csv` | Draft comparison presence matrix as CSV |
+| GET | `/api/export/profile-comparison.csv` | Per-profile comparison metrics as CSV |
+| GET | `/api/export/profile-comparison.json` | Full profile comparison report as JSON |
 | GET | `/api/export/draft.json` | Full draft payload as JSON |
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
@@ -80,6 +86,7 @@ Configuration:
 | POST | `/api/review` | Record an approve / reject / reset transition |
 | POST | `/api/trend` | Analyse an ordered list of 2–20 releases |
 | POST | `/api/compare` | Compare 2–10 candidate drafts |
+| POST | `/api/compare-profiles` | Compare one changelog across QA rule profiles |
 
 `POST /api/generate` body:
 
@@ -602,6 +609,112 @@ matrix CSV* buttons. The buttons are built in the browser from the returned
 payload and emit exactly the same bytes as the corresponding export endpoints.
 Draft comparison was added in **v0.9.0**; no third-party dependency is
 required.
+
+## Comparing QA rule profiles
+
+Choosing a QA rule profile (see [QA rule profiles](#qa-rule-profiles)) used to
+be guesswork: a clean draft may be clean because the entries are genuinely good
+or because the profile was lenient, and there was no way to see how the *same*
+changelog would score under every profile at once. `POST
+/api/compare-profiles` fixes that. It parses the changelog once, QA-checks it
+under each requested profile (every built-in by default) and returns the
+per-profile metrics plus a deterministic recommendation. Everything is offline
+and deterministic and reuses the existing importer, QA engine and config
+layering.
+
+```json
+{
+  "format": "csv",
+  "content": "id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports in one click,The world's best export experience,REL-1\n",
+  "profiles": ["marketing-safe", "internal"],
+  "config": {}
+}
+```
+
+`format`, `profiles` and `config` are all optional. `profiles` must be a list
+of built-in profile names (default: `strict`, `marketing-safe`, `internal`);
+`config` is an inline workspace config layered on top of every profile. The
+response echoes a `baseline` (the first requested profile) and:
+
+```json
+{
+  "baseline": "marketing-safe",
+  "profiles": [
+    {
+      "name": "marketing-safe",
+      "description": "Bans common marketing hype phrases from release notes.",
+      "entry_count": 1,
+      "counts": { "high": 0, "medium": 1, "low": 0, "total": 1 },
+      "publishable": true,
+      "sourced_ratio": 1.0,
+      "vague_hits": 0,
+      "banned_hits": 1,
+      "flag_counts": { "banned_phrase": 1 },
+      "flag_severities": { "banned_phrase": "medium" },
+      "delta": { "high": 0, "total": 0, "sourced_ratio": 0.0 }
+    }
+  ],
+  "recommendation": {
+    "profile": "internal",
+    "reason": "Fewest high-severity flags (0), fewest total flags (0) and highest sourced ratio (1.00)."
+  }
+}
+```
+
+Each `profiles` row reuses the trend/compare metrics (`entry_count`, `counts`,
+`publishable`, `sourced_ratio`, `vague_hits`, `banned_hits`) and adds
+`flag_counts` / `flag_severities` per flag code plus a `delta` of its `high`,
+`total` and `sourced_ratio` against the baseline. The **recommendation rule**
+is deterministic: pick the profile with the fewest `high` flags, then the
+fewest `total` flags, then the highest `sourced_ratio`; ties fall back to input
+order. The `reason` string names the winning `high`, `total` and
+`sourced_ratio` values.
+
+Bad input behaves like the rest of the API: malformed JSON, a missing
+`content`, a non-list `profiles` value or an invalid `config` returns HTTP 400,
+an unknown profile returns HTTP 400 naming it (and stores no draft), a body over
+2 MiB returns HTTP 413 and unparseable content returns HTTP 422.
+
+Sample request and downloads:
+
+```sh
+curl 'http://127.0.0.1:8080/api/compare-profiles/sample'
+
+curl -X POST 'http://127.0.0.1:8080/api/compare-profiles' \
+  -H 'Content-Type: application/json' \
+  -d '{"format": "csv", "content": "id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports in one click,The world'"'"'s best export experience,REL-1\n"}'
+```
+
+```sh
+curl -G 'http://127.0.0.1:8080/api/export/profile-comparison.csv' \
+  --data-urlencode 'format=csv' \
+  --data-urlencode 'profile=marketing-safe' \
+  --data-urlencode 'profile=internal' \
+  --data-urlencode $'content=id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports in one click,The world'"'"'s best export experience,REL-1\n'
+```
+
+```csv
+profile,entry_count,high,medium,low,total,publishable,sourced_ratio,vague_hits,banned_hits
+marketing-safe,1,0,1,0,1,True,1.0,0,1
+internal,1,0,0,0,0,True,1.0,0,0
+```
+
+| Endpoint | Shape |
+| --- | --- |
+| `GET /api/export/profile-comparison.csv` | `profile,entry_count,high,medium,low,total,publishable,sourced_ratio,vague_hits,banned_hits` — one row per profile (header only when the report is empty). |
+| `GET /api/export/profile-comparison.json` | The full report as stable JSON (sorted keys, UTF-8, no `NaN`). |
+
+Both exports accept `format`, `content`, an optional repeated `profile` query
+parameter and an optional inline `config` (as a JSON query parameter), and
+answer with a `Content-Disposition: attachment` header.
+
+The browser UI adds a *Compare profiles* section: a textarea prefilled from
+`/api/compare-profiles/sample`, a checkbox list populated from `/api/profiles`,
+a *Compare profiles* button, a per-profile results table with the recommended
+profile highlighted, and *Download profile comparison CSV* / *Download profile
+comparison JSON* buttons built in the browser from the returned payload (so
+they need no extra server round-trip). Profile comparison was added in
+**v0.11.0**; no third-party dependency is required.
 
 ## Input format
 
