@@ -32,10 +32,11 @@ Only the Python standard library is used.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .config import WorkspaceConfig
-from .importer import parse_entries
+from .importer import explicit_id, parse_entries
 from .models import ChangeEntry
 from .profiles import resolve_config
 from .qa import analyze_entries
@@ -54,6 +55,28 @@ ConfigInput = Optional[Union[WorkspaceConfig, Dict[str, Any]]]
 def _normalize(text: Any) -> str:
     """Lower-case and collapse whitespace so trivial edits do not count."""
     return " ".join(str(text or "").split()).lower()
+
+
+# The positional placeholder the importer assigns to records without an id.
+_SYNTHETIC_ID_RE = re.compile(r"^entry-\d+$")
+
+
+def _explicit_id(entry: ChangeEntry) -> str:
+    """Return ``entry``'s real id, or ``""`` when the id is a placeholder.
+
+    :func:`releasenote.importer.parse_entries` always assigns an
+    ``entry-N`` id when the source record carries no id alias. Those
+    placeholders shift with row order, so they must not be used to key or
+    compare entries. When the record is available we inspect it directly;
+    hand-built entries without ``raw`` fall back to recognising the
+    placeholder shape.
+    """
+    if entry.raw:
+        return explicit_id(entry.raw)
+    normalized = _normalize(entry.id)
+    if not normalized or _SYNTHETIC_ID_RE.match(normalized):
+        return ""
+    return entry.id
 
 
 def _coerce_workspace(config: ConfigInput) -> WorkspaceConfig:
@@ -115,8 +138,13 @@ def _normalize_drafts(drafts: Any) -> List[Dict[str, str]]:
 
 
 def _entry_key(entry: ChangeEntry) -> str:
-    """Return the matrix key for ``entry`` (normalized id, then title)."""
-    normalized_id = _normalize(entry.id)
+    """Return the matrix key for ``entry`` (normalized id, then title).
+
+    Importer-synthesized ``entry-N`` placeholders are treated as absent so
+    drafts without an ``id`` column still compare by their normalized title
+    regardless of row order.
+    """
+    normalized_id = _normalize(_explicit_id(entry))
     if normalized_id:
         return normalized_id
     return _normalize(entry.title)
@@ -125,7 +153,7 @@ def _entry_key(entry: ChangeEntry) -> str:
 def _entry_signature(entry: ChangeEntry) -> Tuple[str, ...]:
     """Return the comparable fields that decide ``identical`` vs ``changed``."""
     return (
-        entry.id,
+        _explicit_id(entry),
         entry.type,
         entry.title,
         entry.description,
@@ -231,7 +259,7 @@ def compute_comparison(
         matrix.append(
             {
                 "key": key,
-                "id": first.id,
+                "id": _explicit_id(first),
                 "title": first.title,
                 "type": first.type,
                 "presence": presence,

@@ -25,7 +25,7 @@ from releasenote.exporters import (
     comparison_json,
     comparison_matrix_csv,
 )
-from releasenote.importer import ParseError
+from releasenote.importer import ParseError, parse_entries
 from releasenote.models import ChangeEntry
 from releasenote.profiles import UnknownProfileError
 from releasenote.server import create_server
@@ -130,6 +130,37 @@ class ComputeComparisonTests(unittest.TestCase):
         entry = ChangeEntry(title="Bulk  Export", id="")
         self.assertEqual(_entry_key(entry), "bulk export")
         self.assertEqual(_entry_key(ChangeEntry(title="X", id="REL-9")), "rel-9")
+
+    def test_entry_key_ignores_importer_synthetic_id(self):
+        entries = parse_entries(
+            "title,description\nBulk export,Export all reports\n"
+        )
+        self.assertEqual(entries[0].id, "entry-1")
+        self.assertEqual(_entry_key(entries[0]), "bulk export")
+
+    def test_reordered_drafts_without_ids_key_by_title(self):
+        # Same entry at different row positions with no id column: the
+        # positional entry-N placeholders must not make it look unique.
+        draft_a = (
+            "title,description,benefit\n"
+            "Bulk export,Export all reports,Saves time\n"
+        )
+        draft_b = (
+            "title,description,benefit\n"
+            "Other change,Something else,Nothing new\n"
+            "Bulk export,Export all reports,Saves time\n"
+        )
+        report = compute_comparison(
+            [_draft("a", draft_a), _draft("b", draft_b)]
+        )
+        matrix = {row["key"]: row for row in report["matrix"]}
+        self.assertEqual(
+            matrix["bulk export"]["presence"],
+            {"a": "identical", "b": "identical"},
+        )
+        self.assertEqual(matrix["bulk export"]["id"], "")
+        self.assertEqual(report["shared"], ["bulk export"])
+        self.assertEqual(report["unique"], {"a": [], "b": ["other change"]})
 
     def test_vague_and_banned_hits(self):
         vague = (

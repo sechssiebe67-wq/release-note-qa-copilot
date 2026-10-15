@@ -441,7 +441,7 @@ a draft scores exactly as it does through `POST /api/generate`.
   ],
   "matrix": [
     {"key": "rel-1", "id": "REL-1", "title": "Bulk export", "type": "feature",
-     "presence": {"branch-a": "changed", "branch-b": "identical"}}
+     "presence": {"branch-a": "identical", "branch-b": "changed"}}
   ],
   "shared": ["rel-4"],
   "unique": {"branch-a": ["rel-2"], "branch-b": ["rel-3"]},
@@ -453,11 +453,14 @@ Each `drafts` row reuses the trend table's metrics: `label`, `entry_count`,
 `counts` (high/medium/low/total), `publishable`, `sourced_ratio`, `vague_hits`
 and `banned_hits`. Every distinct entry — keyed by normalized `id` first, then
 normalized title — becomes one `matrix` row carrying the canonical `id`,
-`title`, `type` and a `presence` mapping `label → identical|changed|unique`:
-`identical` means the entry is byte-identical to the first draft that contained
-it, `changed` means it appears in that draft with different fields, and `unique`
-means it appears in exactly one draft. `shared` lists the keys present in every
-draft, and `unique` maps each label to the keys that appear only in that draft.
+`title`, `type` and a `presence` mapping `label → identical|changed|unique`.
+The importer's positional `entry-N` placeholder for records that carry no id
+is disregarded, so drafts without an `id` column still match on title
+regardless of row order. `identical` means the entry is byte-identical to the
+first draft that contained it, `changed` means it appears in that draft with
+different fields, and `unique` means it appears in exactly one draft. `shared`
+lists the keys present in every draft, and `unique` maps each label to the keys
+that appear only in that draft.
 
 **Recommendation rule (deterministic).** The recommended draft has the fewest
 `high` flags, then the fewest `total` flags, then the highest `sourced_ratio`,
