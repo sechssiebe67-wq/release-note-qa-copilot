@@ -137,6 +137,10 @@
           <label for="title">Draft title</label>
           <input id="title" value="Release Notes" />
         </div>
+        <div>
+          <label for="draftKey">Draft key (optional)</label>
+          <input id="draftKey" placeholder="e.g. release-2.0" />
+        </div>
       </div>
       <div style="margin-top:.6rem">
         <label for="content">Changelog / ticket data</label>
@@ -352,6 +356,23 @@
       <div id="shareStatus" class="muted" style="margin-top:.4rem"></div>
     </section>
 
+    <section style="grid-column: 1 / -1;" id="versionsHint" hidden>
+      <label>Versions</label>
+      <p class="muted">Track how a draft evolves through edits and roll back to a previously approved version. Set <code>DATA_DIR</code> when starting the server and enter a <em>Draft key</em> before generating to keep immutable versions.</p>
+    </section>
+
+    <section style="grid-column: 1 / -1;" id="versionsSection" hidden>
+      <label>Versions</label>
+      <p class="muted">Generating with the same <em>Draft key</em> appends an immutable version. Diff a version against the latest or roll back to it.</p>
+      <div id="versionsList" class="muted">No versions yet.</div>
+      <div id="versionDiff" class="muted"></div>
+      <div class="row" style="margin-top:.4rem" id="versionsExports">
+        <button id="downloadVersionsCsv" class="secondary" type="button">Download versions CSV</button>
+        <button id="downloadVersionsJson" class="secondary" type="button">Download versions JSON</button>
+        <button id="downloadVersionDiffCsv" class="secondary" type="button" hidden>Download version diff CSV</button>
+      </div>
+    </section>
+
     <section style="grid-column: 1 / -1;">
       <div class="row">
         <div><label>Markdown draft</label></div>
@@ -430,6 +451,9 @@
     let lastComparison = null;
     let lastProfileComparison = null;
     let lastArchive = null;
+    let lastVersions = null;
+    let lastVersionsKey = null;
+    let lastVersionDiff = null;
 
     async function api(path, options) {
       const res = await fetch(path, options);
@@ -732,6 +756,8 @@
       if (profile) body.profile = profile;
       const template = $("template").value;
       if (template) body.template = template;
+      const draftKey = $("draftKey").value.trim();
+      if (draftKey) body.draft_key = draftKey;
       try {
         const result = await api("/api/generate", {
           method: "POST",
@@ -741,6 +767,12 @@
         renderResult(result);
         $("status").textContent = "Draft generated.";
         loadHistory();
+        if (result.draft_key) {
+          await loadVersions(result.draft_key);
+        } else {
+          $("versionsSection").hidden = true;
+          $("versionsHint").hidden = true;
+        }
       } catch (err) {
         $("status").textContent = "Error: " + err.message;
       } finally {
@@ -1456,6 +1488,155 @@
       }
     }
 
+    function renderVersions(listing) {
+      const versions = (listing && listing.versions) || [];
+      $("versionsList").innerHTML = versions.length
+        ? '<table class="trend"><thead><tr>' +
+            '<th>Version</th><th>Draft</th><th>Created</th><th>Actions</th>' +
+          '</tr></thead><tbody>' +
+          versions.map(v => {
+            const when = v.created_at ? new Date(v.created_at).toLocaleString() : "";
+            return '<tr>' +
+              '<td><span class="pill">v' + esc(v.version) + '</span></td>' +
+              '<td><code>' + esc(v.draft_id) + '</code></td>' +
+              '<td>' + esc(when) + '</td>' +
+              '<td><div class="row" style="gap:.3rem">' +
+                '<button class="secondary" type="button" data-version-view="' + esc(v.version) + '">View</button>' +
+                '<button class="secondary" type="button" data-version-diff="' + esc(v.version) + '">Diff against latest</button>' +
+                '<button class="secondary" type="button" data-version-rollback="' + esc(v.version) + '">Roll back</button>' +
+              '</div></td>' +
+            '</tr>';
+          }).join("") + '</tbody></table>'
+        : '<div class="muted">No versions yet.</div>';
+      $("versionsList").querySelectorAll("[data-version-view]").forEach(btn => {
+        btn.addEventListener("click", () =>
+          viewVersion(btn.getAttribute("data-version-view")));
+      });
+      $("versionsList").querySelectorAll("[data-version-diff]").forEach(btn => {
+        btn.addEventListener("click", () =>
+          diffVersion(btn.getAttribute("data-version-diff")));
+      });
+      $("versionsList").querySelectorAll("[data-version-rollback]").forEach(btn => {
+        btn.addEventListener("click", () =>
+          rollbackVersion(btn.getAttribute("data-version-rollback")));
+      });
+    }
+
+    async function loadVersions(draftKey) {
+      lastVersionsKey = draftKey;
+      try {
+        const listing = await api("/api/versions/" + encodeURIComponent(draftKey));
+        lastVersions = listing;
+        lastVersionDiff = null;
+        $("downloadVersionDiffCsv").hidden = true;
+        $("versionDiff").textContent = "";
+        $("versionsSection").hidden = false;
+        $("versionsHint").hidden = true;
+        renderVersions(listing);
+      } catch (err) {
+        if (String(err.message).indexOf("DATA_DIR") !== -1) {
+          $("versionsSection").hidden = true;
+          $("versionsHint").hidden = false;
+        } else {
+          $("versionsList").textContent = "Error: " + err.message;
+        }
+      }
+    }
+
+    async function viewVersion(version) {
+      if (!lastVersionsKey) return;
+      try {
+        const payload = await api("/api/versions/" + encodeURIComponent(lastVersionsKey) +
+          "/" + encodeURIComponent(version));
+        lastMarkdown = payload.markdown || "";
+        $("markdown").textContent = lastMarkdown;
+        $("status").textContent = "Viewing version " + version + ".";
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      }
+    }
+
+    function latestVersion() {
+      const versions = (lastVersions && lastVersions.versions) || [];
+      return versions.length ? versions[versions.length - 1].version : null;
+    }
+
+    async function diffVersion(version) {
+      if (!lastVersionsKey) return;
+      const latest = latestVersion();
+      if (latest === null) return;
+      try {
+        const report = await api("/api/versions/diff", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            draft_key: lastVersionsKey,
+            previous_version: Number(version),
+            current_version: Number(latest)
+          })
+        });
+        lastVersionDiff = report;
+        $("downloadVersionDiffCsv").hidden = false;
+        $("versionDiff").innerHTML =
+          '<div class="muted">v' + esc(report.previous_version) + " → v" +
+          esc(report.current_version) + '</div>' + renderDiff(report.diff);
+        $("status").textContent = "Version diff generated.";
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      }
+    }
+
+    async function rollbackVersion(version) {
+      if (!lastVersionsKey) return;
+      try {
+        const payload = await api("/api/versions/rollback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            draft_key: lastVersionsKey,
+            version: Number(version)
+          })
+        });
+        renderResult(payload);
+        $("status").textContent = "Rolled back to version " + version +
+          " (from " + payload.rolled_back_from + ").";
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      }
+    }
+
+    function buildVersionsCsv(listing) {
+      const rows = ((listing && listing.versions) || []).map(v =>
+        [v.version, v.draft_id, v.created_at]);
+      return buildCsv(["version", "draft_id", "created_at"], rows);
+    }
+
+    function downloadVersionsCsv() {
+      if (!lastVersions) return;
+      saveBlob("draft-versions.csv", buildVersionsCsv(lastVersions), "text/csv");
+    }
+
+    function downloadVersionsJson() {
+      if (!lastVersions) return;
+      saveBlob("draft-versions.json", stableJson(lastVersions, null), "application/json");
+    }
+
+    function buildVersionDiffCsv(report) {
+      const categories = ["added", "changed", "removed", "unchanged", "repeated_claims", "regressions"];
+      const rows = [];
+      categories.forEach(category => {
+        ((report.diff || {})[category] || []).forEach(item => {
+          rows.push([report.current_version, category, item.id, item.title, item.type, item.reason]);
+        });
+      });
+      return buildCsv(["version", "category", "id", "title", "type", "reason"], rows);
+    }
+
+    function downloadVersionDiffCsv() {
+      if (!lastVersionDiff) return;
+      saveBlob("draft-version-diff.csv", buildVersionDiffCsv(lastVersionDiff), "text/csv");
+    }
+
     function archiveFilters() {
       const params = new URLSearchParams();
       const q = $("archiveQuery").value.trim();
@@ -1625,6 +1806,12 @@
     $("searchArchive").addEventListener("click", loadArchive);
     $("downloadArchiveCsv").addEventListener("click", downloadArchiveCsv);
     $("downloadArchiveJson").addEventListener("click", downloadArchiveJson);
+    $("downloadVersionsCsv").addEventListener("click", downloadVersionsCsv);
+    $("downloadVersionsJson").addEventListener("click", downloadVersionsJson);
+    $("downloadVersionDiffCsv").addEventListener("click", downloadVersionDiffCsv);
+    $("draftKey").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); generate(); }
+    });
     $("archiveQuery").addEventListener("keydown", (event) => {
       if (event.key === "Enter") { event.preventDefault(); loadArchive(); }
     });

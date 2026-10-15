@@ -78,19 +78,36 @@ from .exporters import (
     template_json,
     trend_csv,
     trend_json,
+    version_diff_csv,
+    versions_csv,
+    versions_json,
 )
-from .storage import ArchiveStore, DraftStore, ReviewStore
+from .storage import ArchiveStore, DraftStore, DraftVersionStore, ReviewStore
 from .service import (
     HistoryRequiredError,
     build_archive,
     build_comparison,
     build_profile_comparison,
     build_trend,
+    diff_draft_versions,
     get_archive_entry,
+    get_draft_version,
     get_review,
     get_shared_draft,
+    list_draft_versions,
     record_review,
+    rollback_draft_version,
+    store_draft_version,
     tag_draft,
+)
+from .versioning import (
+    DRAFT_KEY_PATTERN,
+    MAX_DRAFT_KEY_LENGTH,
+    diff_versions,
+    next_version,
+    rollback_plan,
+    sort_versions,
+    validate_draft_key,
 )
 
 __all__ = [
@@ -168,9 +185,13 @@ __all__ = [
     "profile_comparison_json",
     "archive_csv",
     "archive_json",
+    "versions_csv",
+    "versions_json",
+    "version_diff_csv",
     "DraftStore",
     "ReviewStore",
     "ArchiveStore",
+    "DraftVersionStore",
     "record_review",
     "get_review",
     "get_shared_draft",
@@ -178,6 +199,18 @@ __all__ = [
     "get_archive_entry",
     "tag_draft",
     "HistoryRequiredError",
+    "DRAFT_KEY_PATTERN",
+    "MAX_DRAFT_KEY_LENGTH",
+    "validate_draft_key",
+    "next_version",
+    "sort_versions",
+    "diff_versions",
+    "rollback_plan",
+    "store_draft_version",
+    "list_draft_versions",
+    "get_draft_version",
+    "diff_draft_versions",
+    "rollback_draft_version",
 ]
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"

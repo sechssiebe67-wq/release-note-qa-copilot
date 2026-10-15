@@ -36,6 +36,9 @@ from .exporters import (
     template_json,
     trend_csv,
     trend_json,
+    version_diff_csv,
+    versions_csv,
+    versions_json,
 )
 from .importer import ParseError
 from .profiles import (
@@ -58,19 +61,25 @@ from .service import (
     build_draft,
     build_profile_comparison,
     build_trend,
+    diff_draft_versions,
     get_archive_entry,
+    get_draft_version,
     get_review,
     get_shared_draft,
+    list_draft_versions,
     record_review,
+    rollback_draft_version,
     sample,
     sample_archive,
     sample_comparison,
     sample_profile_comparison,
     sample_trend,
     sample_workspace_config,
+    store_draft_version,
     tag_draft,
 )
-from .storage import ArchiveStore, DraftStore, ReviewStore
+from .storage import ArchiveStore, DraftStore, DraftVersionStore, ReviewStore
+from .versioning import validate_draft_key
 
 MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MiB upload cap.
 MAX_DRAIN_BYTES = 8 * 1024 * 1024  # Bounded read of an over-limit body.
@@ -144,6 +153,15 @@ _ARCHIVE_EXPORTS = {
         "application/json; charset=utf-8",
         "draft-archive.json",
     ),
+}
+# Version exports are built from the stored version log keyed by ``draft_key``.
+_VERSION_EXPORTS = {
+    "/api/export/versions.csv": ("text/csv", "draft-versions.csv"),
+    "/api/export/versions.json": (
+        "application/json; charset=utf-8",
+        "draft-versions.json",
+    ),
+    "/api/export/version-diff.csv": ("text/csv", "draft-version-diff.csv"),
 }
 _FORMATS = ("auto", "csv", "json")
 
@@ -386,6 +404,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/archive/"):
             self._handle_archive_entry(path)
             return
+        if path.startswith("/api/versions/"):
+            self._handle_version_get(path)
+            return
         if path == "/api/history":
             store = getattr(self.server, "store", None)
             query = parse_qs(parsed.query)
@@ -419,6 +440,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._shared_draft(draft_id, json_errors=True)
             if payload is not None:
                 self._send_json(200, payload)
+            return
+        if path in _VERSION_EXPORTS:
+            self._handle_version_export(path, parsed)
             return
         if path in _ARCHIVE_EXPORTS:
             self._handle_archive_export(path, parsed)
@@ -544,6 +568,114 @@ class Handler(BaseHTTPRequestHandler):
 
     def _archive_store(self) -> Optional[ArchiveStore]:
         return getattr(self.server, "archive_store", None)
+
+    def _versions_store(self) -> Optional[DraftVersionStore]:
+        return getattr(self.server, "version_store", None)
+
+    def _handle_version_get(self, path: str) -> None:
+        """Serve the draft version listing or one stored version payload.
+
+        ``/api/versions/<draft_key>`` returns ``{draft_key, versions: [{version,
+        draft_id, created_at}]}`` (an unknown key yields an empty list) and
+        ``/api/versions/<draft_key>/<version>`` returns the stored payload. A
+        malformed key is HTTP 400, an unknown version is HTTP 404 and an unset
+        history store is HTTP 409 naming ``DATA_DIR``.
+        """
+        remainder = path[len("/api/versions/"):]
+        parts = [part for part in remainder.split("/") if part]
+        if len(parts) == 1:
+            try:
+                payload = list_draft_versions(parts[0], self._versions_store())
+            except HistoryRequiredError as exc:
+                self._send_json(409, {"error": str(exc)})
+                return
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            self._send_json(200, payload)
+            return
+        if len(parts) == 2:
+            try:
+                payload = get_draft_version(
+                    parts[0], parts[1], self._versions_store()
+                )
+            except HistoryRequiredError as exc:
+                self._send_json(409, {"error": str(exc)})
+                return
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            except LookupError as exc:
+                self._send_json(404, {"error": str(exc)})
+                return
+            self._send_json(200, payload)
+            return
+        self._send_json(404, {"error": "not found", "path": path})
+
+    def _handle_version_export(self, path: str, parsed: Any) -> None:
+        """Serve a version-listing or version-diff export.
+
+        ``GET /api/export/versions.csv`` / ``.json`` take a ``draft_key`` query
+        parameter and list every version. ``GET /api/export/version-diff.csv``
+        additionally takes ``previous_version`` and ``current_version`` and
+        renders the diff rows with a leading ``version`` column. Both answer
+        with a ``Content-Disposition: attachment`` header; a missing or invalid
+        parameter is HTTP 400, an unknown version is HTTP 404 and an unset
+        history store is HTTP 409 naming ``DATA_DIR``.
+        """
+        query = parse_qs(parsed.query)
+        draft_key = _first(query, "draft_key")
+        if not draft_key or not draft_key.strip():
+            self._send_json(400, {"error": "query 'draft_key' is required"})
+            return
+        try:
+            if path == "/api/export/version-diff.csv":
+                previous = _first(query, "previous_version")
+                current = _first(query, "current_version")
+                if not previous or not current:
+                    self._send_json(
+                        400,
+                        {
+                            "error": (
+                                "query 'previous_version' and "
+                                "'current_version' are required"
+                            )
+                        },
+                    )
+                    return
+                result = diff_draft_versions(
+                    draft_key,
+                    previous,
+                    current,
+                    None,
+                    self._versions_store(),
+                )
+                body = version_diff_csv(result)
+            else:
+                listing = list_draft_versions(
+                    draft_key, self._versions_store()
+                )
+                body = (
+                    versions_csv(listing)
+                    if path.endswith(".csv")
+                    else versions_json(listing)
+                )
+        except HistoryRequiredError as exc:
+            self._send_json(409, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except LookupError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        content_type, filename = _VERSION_EXPORTS[path]
+        self._send(
+            200,
+            body.encode("utf-8"),
+            content_type,
+            {"Content-Disposition": 'attachment; filename="{}"'.format(filename)},
+        )
 
     def _handle_archive(self, parsed: Any) -> None:
         """Serve the filtered, paginated draft archive listing.
@@ -943,6 +1075,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/compare",
             "/api/compare-profiles",
             "/api/archive/tag",
+            "/api/versions/diff",
+            "/api/versions/rollback",
         ):
             self._send_json(404, {"error": "not found", "path": parsed.path})
             return
@@ -951,6 +1085,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/archive/tag":
             self._post_archive_tag(payload)
+            return
+        if path == "/api/versions/diff":
+            self._post_version_diff(payload)
+            return
+        if path == "/api/versions/rollback":
+            self._post_version_rollback(payload)
             return
         if path == "/api/review":
             self._post_review(payload)
@@ -1091,6 +1231,85 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_json(200, result)
 
+    def _post_version_diff(self, payload: Dict[str, Any]) -> None:
+        """Diff two stored versions of the same logical draft.
+
+        The body is ``{draft_key, previous_version, current_version, config?}``
+        and the response is ``{previous_version, current_version, diff, flags}``
+        with the same six diff categories as ``POST /api/diff``. A missing or
+        malformed field is HTTP 400, an unknown version is HTTP 404 and an
+        unset history store is HTTP 409 naming ``DATA_DIR``.
+        """
+        draft_key = payload.get("draft_key")
+        if not isinstance(draft_key, str) or not draft_key.strip():
+            self._send_json(400, {"error": "field 'draft_key' is required"})
+            return
+        previous_version = payload.get("previous_version")
+        current_version = payload.get("current_version")
+        if previous_version is None or current_version is None:
+            self._send_json(
+                400,
+                {
+                    "error": (
+                        "fields 'previous_version' and 'current_version' "
+                        "are required"
+                    )
+                },
+            )
+            return
+        resolved = self._resolve_request(payload)
+        if resolved is None:
+            return
+        workspace, _profile, _template = resolved
+        try:
+            result = diff_draft_versions(
+                draft_key,
+                previous_version,
+                current_version,
+                workspace,
+                self._versions_store(),
+            )
+        except HistoryRequiredError as exc:
+            self._send_json(409, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except LookupError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        self._send_json(200, result)
+
+    def _post_version_rollback(self, payload: Dict[str, Any]) -> None:
+        """Return a previous version's payload with ``rolled_back_from`` set.
+
+        The body is ``{draft_key, version}``. A missing field is HTTP 400, an
+        unknown version is HTTP 404 and an unset history store is HTTP 409
+        naming ``DATA_DIR``.
+        """
+        draft_key = payload.get("draft_key")
+        if not isinstance(draft_key, str) or not draft_key.strip():
+            self._send_json(400, {"error": "field 'draft_key' is required"})
+            return
+        version = payload.get("version")
+        if version is None:
+            self._send_json(400, {"error": "field 'version' is required"})
+            return
+        try:
+            result = rollback_draft_version(
+                draft_key, version, self._versions_store()
+            )
+        except HistoryRequiredError as exc:
+            self._send_json(409, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except LookupError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        self._send_json(200, result)
+
     def _post_generate(
         self,
         payload: Dict[str, Any],
@@ -1107,9 +1326,31 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(fmt, str) or not isinstance(title, str):
             self._send_json(400, {"error": "'format' and 'title' must be strings"})
             return
+        draft_key = payload.get("draft_key")
+        if draft_key is not None:
+            if not isinstance(draft_key, str):
+                self._send_json(
+                    400, {"error": "field 'draft_key' must be a string"}
+                )
+                return
+            try:
+                draft_key = validate_draft_key(draft_key)
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+        version_store = (
+            self._versions_store() if draft_key is not None else None
+        )
         try:
             result = build_draft(
-                content, fmt, title, workspace, profile, template
+                content,
+                fmt,
+                title,
+                workspace,
+                profile,
+                template,
+                draft_key,
+                version_store,
             )
         except ParseError as exc:
             self._send_json(422, {"error": str(exc)})
@@ -1118,6 +1359,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid config: {}".format(exc)})
             return
         self._store(result)
+        if draft_key is not None and version_store is not None:
+            try:
+                store_draft_version(
+                    draft_key,
+                    result.get("draft_id"),
+                    result,
+                    version_store,
+                )
+            except HistoryRequiredError:
+                pass
         self._send_json(200, result)
 
     def _post_diff(
@@ -1163,6 +1414,9 @@ def create_server(
     server.store = DraftStore(data_dir) if data_dir else None
     server.review_store = ReviewStore(data_dir, server.store)
     server.archive_store = ArchiveStore(data_dir)
+    # Versioning needs durable history: with ``DATA_DIR`` unset the version
+    # store is ``None`` so every versioning endpoint answers HTTP 409.
+    server.version_store = DraftVersionStore(data_dir) if data_dir else None
     return server, server.server_address[0], server.server_address[1]
 
 

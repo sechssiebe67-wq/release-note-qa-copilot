@@ -55,6 +55,13 @@ ARCHIVE_HEADER = (
     "tags",
 )
 
+# The draft version listing, one row per immutable version.
+VERSIONS_HEADER = ("version", "draft_id", "created_at")
+
+# A version diff reuses the diff columns with the version being diffed to as
+# the leading column.
+VERSION_DIFF_HEADER = ("version",) + DIFF_HEADER
+
 # The profile comparison table repeats the same metrics keyed by profile name.
 PROFILE_COMPARISON_HEADER = (
     "profile",
@@ -481,6 +488,63 @@ def archive_json(report: Mapping[str, Any]) -> str:
     )
 
 
+def versions_csv(payload: Mapping[str, Any]) -> str:
+    """Return one CSV row per draft version.
+
+    Header: ``version,draft_id,created_at``. A payload without a ``versions``
+    list yields just the header row, so the shape is always stable.
+    """
+    rows = []
+    for item in _as_list(_as_mapping(payload).get("versions")):
+        version = _as_mapping(item)
+        rows.append(
+            (
+                version.get("version", ""),
+                version.get("draft_id", ""),
+                version.get("created_at", ""),
+            )
+        )
+    return _render_csv(VERSIONS_HEADER, rows)
+
+
+def versions_json(payload: Mapping[str, Any]) -> str:
+    """Serialise a version listing as stable, UTF-8 JSON without NaN."""
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
+def version_diff_csv(payload: Mapping[str, Any]) -> str:
+    """Return the diff rows for a version comparison with a leading version.
+
+    Header: ``version,category,id,title,type,reason`` where ``version`` is the
+    ``current_version`` being diffed to and ``category`` is one of
+    :data:`DIFF_CATEGORIES`. A payload without a ``diff`` key returns only the
+    header row.
+    """
+    data = _as_mapping(payload)
+    version = data.get("current_version", "")
+    diff = _as_mapping(data.get("diff"))
+    rows: List[Sequence[Any]] = []
+    for category in DIFF_CATEGORIES:
+        for item in _as_list(diff.get(category)):
+            entry = _as_mapping(item)
+            rows.append(
+                (
+                    version,
+                    category,
+                    entry.get("id", ""),
+                    entry.get("title", ""),
+                    entry.get("type", ""),
+                    entry.get("reason", ""),
+                )
+            )
+    return _render_csv(VERSION_DIFF_HEADER, rows)
+
+
 __all__ = [
     "QA_FLAG_HEADER",
     "CHECKLIST_HEADER",
@@ -493,6 +557,8 @@ __all__ = [
     "COMPARISON_MATRIX_HEADER",
     "PROFILE_COMPARISON_HEADER",
     "ARCHIVE_HEADER",
+    "VERSIONS_HEADER",
+    "VERSION_DIFF_HEADER",
     "DIFF_CATEGORIES",
     "qa_flags_csv",
     "checklist_csv",
@@ -513,4 +579,7 @@ __all__ = [
     "profile_comparison_json",
     "archive_csv",
     "archive_json",
+    "versions_csv",
+    "versions_json",
+    "version_diff_csv",
 ]
