@@ -157,6 +157,9 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+    // Escape untrusted changelog/ticket fields before inserting into innerHTML.
+    const ESCAPE_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+    const esc = (value) => String(value).replace(/[&<>"']/g, (c) => ESCAPE_MAP[c]);
     let lastMarkdown = "";
 
     async function api(path, options) {
@@ -182,23 +185,23 @@
     function renderFlags(flags) {
       if (!flags.length) return '<div class="muted">No flags.</div>';
       return flags.map(f =>
-        '<div class="flag ' + f.severity + '"><strong>' + f.code + '</strong> — ' + f.message + '</div>'
+        '<div class="flag ' + esc(f.severity) + '"><strong>' + esc(f.code) + '</strong> — ' + esc(f.message) + '</div>'
       ).join("");
     }
 
     function renderResult(result) {
       const counts = result.qa.counts;
       $("summary").innerHTML =
-        '<span class="pill">' + result.entry_count + ' entries</span>' +
+        '<span class="pill">' + esc(result.entry_count) + ' entries</span>' +
         '<span class="pill ' + (result.qa.publishable ? "pass" : "high") + '">' +
           (result.qa.publishable ? "publishable" : "not publishable") + '</span>' +
-        '<span class="pill high">' + counts.high + ' high</span>' +
-        '<span class="pill medium">' + counts.medium + ' medium</span>' +
-        '<span class="pill">' + counts.total + ' flags</span>';
+        '<span class="pill high">' + esc(counts.high) + ' high</span>' +
+        '<span class="pill medium">' + esc(counts.medium) + ' medium</span>' +
+        '<span class="pill">' + esc(counts.total) + ' flags</span>';
 
       $("checklist").innerHTML = result.checklist.map(item => {
         const icon = item.status === "pass" ? "\u2705" : (item.status === "warn" ? "\u26a0" : "\u274c");
-        return '<li>' + icon + ' ' + item.label + ' <span class="muted">— ' + item.detail + '</span></li>';
+        return '<li>' + icon + ' ' + esc(item.label) + ' <span class="muted">— ' + esc(item.detail) + '</span></li>';
       }).join("");
 
       const byId = {};
@@ -207,10 +210,10 @@
       $("entries").innerHTML = result.entries.map(e => {
         const flags = byId[e.id] || [];
         return '<div class="entry-block">' +
-          '<h3>' + (e.title || "(untitled)") + '</h3>' +
-          '<div class="muted">' + e.type + ' · <code>' + e.id + '</code></div>' +
-          '<div>' + (e.description || "") + '</div>' +
-          '<div class="muted">Source: ' + (e.source || e.link || "none") + '</div>' +
+          '<h3>' + esc(e.title || "(untitled)") + '</h3>' +
+          '<div class="muted">' + esc(e.type) + ' · <code>' + esc(e.id) + '</code></div>' +
+          '<div>' + esc(e.description || "") + '</div>' +
+          '<div class="muted">Source: ' + esc(e.source || e.link || "none") + '</div>' +
           renderFlags(flags) +
         '</div>';
       }).join("");
@@ -260,9 +263,9 @@
         const data = await api("/api/history?limit=10");
         if (!data.drafts.length) { $("history").textContent = "No stored drafts."; return; }
         $("history").innerHTML = data.drafts.map(d =>
-          '<div class="flag low"><strong>' + d.title + '</strong> — ' +
-          d.entry_count + ' entries · ' + d.high_flags + ' high · ' +
-          new Date(d.created_at).toLocaleString() + '</div>'
+          '<div class="flag low"><strong>' + esc(d.title) + '</strong> — ' +
+          esc(d.entry_count) + ' entries · ' + esc(d.high_flags) + ' high · ' +
+          esc(new Date(d.created_at).toLocaleString()) + '</div>'
         ).join("");
       } catch (err) {
         $("history").textContent = "";
