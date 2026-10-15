@@ -77,6 +77,18 @@ class BuiltinProfileTests(unittest.TestCase):
         config = get_profile("internal").config
         self.assertIn("misc", config.allow_terms)
 
+    def test_strict_sets_a_gate(self):
+        config = get_profile("strict").config
+        self.assertEqual(config.min_score, 85)
+        self.assertEqual(config.max_high, 0)
+        self.assertFalse(config.is_default())
+
+    def test_other_profiles_have_no_gate(self):
+        for name in ("marketing-safe", "internal"):
+            config = get_profile(name).config
+            self.assertIsNone(config.min_score)
+            self.assertIsNone(config.max_high)
+
 
 class NormalizeProfileNameTests(unittest.TestCase):
     def test_none_and_empty(self):
@@ -145,6 +157,27 @@ class ResolveConfigTests(unittest.TestCase):
             "mutated", BUILTIN_PROFILES["strict"].config.extra_vague_terms
         )
 
+    def test_strict_profile_gate_is_resolved(self):
+        config = resolve_config({"profile": "strict"})
+        self.assertEqual(config.min_score, 85)
+        self.assertEqual(config.max_high, 0)
+
+    def test_inline_gate_overrides_profile_gate(self):
+        config = resolve_config(
+            {"profile": "strict", "config": {"min_score": 50, "max_high": 3}}
+        )
+        self.assertEqual(config.min_score, 50)
+        self.assertEqual(config.max_high, 3)
+        # The profile's other rules are still layered in.
+        self.assertIn("breaking", config.required_sections)
+
+    def test_inline_gate_overrides_one_field_only(self):
+        config = resolve_config(
+            {"profile": "strict", "config": {"min_score": 50}}
+        )
+        self.assertEqual(config.min_score, 50)
+        self.assertEqual(config.max_high, 0)
+
 
 class RuleSummaryTests(unittest.TestCase):
     def _entries(self):
@@ -211,6 +244,20 @@ class RuleSummaryTests(unittest.TestCase):
         config = WorkspaceConfig.default()
         qa = analyze_entries(entries, config)
         json.dumps(rule_summary(entries, qa, config))
+
+    def test_echoes_effective_gate(self):
+        entries = self._entries()
+        config = WorkspaceConfig.from_dict({"min_score": 70, "max_high": 2})
+        qa = analyze_entries(entries, config)
+        summary = rule_summary(entries, qa, config)
+        self.assertEqual(summary["gate"], {"min_score": 70, "max_high": 2})
+
+    def test_gate_is_none_when_unset(self):
+        entries = self._entries()
+        config = WorkspaceConfig.default()
+        qa = analyze_entries(entries, config)
+        summary = rule_summary(entries, qa, config)
+        self.assertEqual(summary["gate"], {"min_score": None, "max_high": None})
 
 
 if __name__ == "__main__":

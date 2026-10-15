@@ -86,6 +86,53 @@ class WorkspaceConfigTests(unittest.TestCase):
         config = WorkspaceConfig.from_dict(payload)
         self.assertEqual(config.extra_vague_terms, ["blazing", "revolutionary"])
         self.assertEqual(config.severity_overrides, {"vague_language": "high"})
+        self.assertEqual(config.min_score, 85)
+        self.assertEqual(config.max_high, 0)
+
+    def test_gate_fields_round_trip(self):
+        payload = {"min_score": 70, "max_high": 2}
+        config = WorkspaceConfig.from_dict(payload)
+        self.assertEqual(config.min_score, 70)
+        self.assertEqual(config.max_high, 2)
+        self.assertEqual(config.to_dict()["min_score"], 70)
+        self.assertEqual(config.to_dict()["max_high"], 2)
+        self.assertEqual(WorkspaceConfig.from_dict(config.to_dict()), config)
+
+    def test_gate_unset_is_default(self):
+        config = WorkspaceConfig.default()
+        self.assertIsNone(config.min_score)
+        self.assertIsNone(config.max_high)
+        self.assertTrue(config.is_default())
+        self.assertNotIn("min_score", config.to_dict())
+        self.assertNotIn("max_high", config.to_dict())
+
+    def test_gate_makes_config_non_default(self):
+        self.assertFalse(WorkspaceConfig.from_dict({"min_score": 50}).is_default())
+        self.assertFalse(WorkspaceConfig.from_dict({"max_high": 0}).is_default())
+
+    def test_gate_rejects_non_integer(self):
+        for key in ("min_score", "max_high"):
+            with self.assertRaises(ValueError):
+                WorkspaceConfig.from_dict({key: "85"})
+            with self.assertRaises(ValueError):
+                WorkspaceConfig.from_dict({key: 1.5})
+            with self.assertRaises(ValueError):
+                WorkspaceConfig.from_dict({key: True})
+
+    def test_gate_rejects_out_of_range(self):
+        with self.assertRaises(ValueError):
+            WorkspaceConfig.from_dict({"min_score": -1})
+        with self.assertRaises(ValueError):
+            WorkspaceConfig.from_dict({"min_score": 101})
+        with self.assertRaises(ValueError):
+            WorkspaceConfig.from_dict({"max_high": -1})
+
+    def test_gate_accepts_boundaries(self):
+        config = WorkspaceConfig.from_dict({"min_score": 0, "max_high": 0})
+        self.assertEqual(config.min_score, 0)
+        self.assertEqual(config.max_high, 0)
+        config = WorkspaceConfig.from_dict({"min_score": 100})
+        self.assertEqual(config.min_score, 100)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,10 @@ unsupported claims are flagged before publishing.
 - Compare the **same** changelog under every QA rule profile side by side: one
   row per profile with its metrics and delta against a baseline, plus a
   deterministic recommendation of the best profile to adopt.
+- Get a single **release readiness score** (0–100) with a `ready` / `review` /
+  `risky` band and an explainable penalty breakdown, plus an optional
+  `min_score` / `max_high` **gate policy** that turns the score into a
+  deterministic `pass` / `fail` ship decision.
 - Export Markdown for Confluence, GitHub Releases or e-mail, and the QA flags,
   checklist and diff as CSV / JSON for spreadsheets and tooling.
 - Hand a draft to a colleague with a read-only share link (`/s/<draft_id>`)
@@ -75,6 +79,8 @@ Configuration:
 | GET | `/api/export/comparison-matrix.csv` | Draft comparison presence matrix as CSV |
 | GET | `/api/export/profile-comparison.csv` | Per-profile comparison metrics as CSV |
 | GET | `/api/export/profile-comparison.json` | Full profile comparison report as JSON |
+| GET | `/api/export/score.csv` | Release readiness score penalties as CSV (`code,severity,count,points`) |
+| GET | `/api/export/score.json` | Full `score` object as JSON |
 | GET | `/api/export/draft.json` | Full draft payload as JSON |
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
@@ -104,8 +110,9 @@ Configuration:
 `profile`, `config` and `template` are all optional. Response contains
 `markdown`, `qa` (flags + counts + `publishable`), `checklist`, the grouped
 `entries`, the effective `config`, the resolved `profile` (or `null`), the
-resolved `template`, a `rules` summary (which includes the resolved template),
-and a `draft_id` when history is enabled.
+resolved `template`, a `rules` summary (which includes the resolved template and
+the effective gate), the `score` (with its `band` and `penalties`), the `gate`
+decision (`status` + `reasons`), and a `draft_id` when history is enabled.
 
 ## Workspace rules
 
@@ -120,10 +127,12 @@ for you). `GET /api/config/sample` returns a valid example.
 | `required_sections` | list of strings | Group keys (`feature`, `fix`, `breaking`, `other`) that must be non-empty, else a `missing_required_section` flag (medium, empty `entry_id`). |
 | `banned_phrases` | list of strings | Literal phrases that trigger a `banned_phrase` flag (medium) naming the match. |
 | `severity_overrides` | object `code → high\|medium\|low` | Re-ranks matching flags. |
+| `min_score` | int `0..100` | Gate: fail when the release readiness score is below this. |
+| `max_high` | int `>= 0` | Gate: fail when the high-severity flag count exceeds this. |
 
-All fields are optional. Unknown keys, non-string list entries and invalid
-severities are rejected with HTTP 400 and no draft is stored. With no `config`
-the built-in rules and severities are unchanged.
+All fields are optional. Unknown keys, non-string list entries, invalid
+severities and invalid gate values are rejected with HTTP 400 and no draft is
+stored. With no `config` the built-in rules and severities are unchanged.
 
 ```json
 {
@@ -152,14 +161,15 @@ merge with the inline value winning). `GET /api/profiles` lists the built-ins:
 
 | Profile | Purpose |
 | --- | --- |
-| `strict` | Re-ranks `vague_language` to `high` and requires a `breaking` section. |
+| `strict` | Re-ranks `vague_language` to `high`, requires a `breaking` section and gates on `min_score = 85` / `max_high = 0`. |
 | `marketing-safe` | Bans common hype phrases (`world's best`, `best-in-class`, `game-changing`, `guaranteed`, `revolutionary`, `cutting-edge`). |
 | `internal` | Allows internal shorthand terms (`misc`, `stuff`, `things`, `various`, `several`). |
 
 An unknown profile returns HTTP 400 naming the profile and stores no draft. The
 response echoes the resolved profile under `profile` and adds a `rules` object
 with the effective vague terms, banned phrases, required sections, severity
-overrides and the number of flags that fired per code. Download it with:
+overrides, the effective gate policy and the number of flags that fired per
+code. Download it with:
 
 | Endpoint | Shape |
 | --- | --- |
@@ -715,6 +725,92 @@ profile highlighted, and *Download profile comparison CSV* / *Download profile
 comparison JSON* buttons built in the browser from the returned payload (so
 they need no extra server round-trip). Profile comparison was added in
 **v0.11.0**; no third-party dependency is required.
+
+## Release readiness score
+
+Individual QA flags tell a reviewer *what* is risky, but not *how close* a draft
+is to shippable. Every draft returned by `POST /api/generate` and
+`POST /api/diff` therefore carries a single, deterministic **release readiness
+score** from `0` to `100` plus an optional **gate policy** that turns the score
+into a `pass` / `fail` ship decision. The score is a pure function of the QA
+flags and the entries: the same input always yields the same result.
+
+The score starts at `100` and subtracts a fixed penalty per flag by severity
+(`high` = 30, `medium` = 15, `low` = 5), divided by the number of entries so a
+one-entry draft is not punished like a fifty-entry one; the result is clamped to
+`0..100`. A draft with no flags scores `100`. The payload gains:
+
+```json
+{
+  "score": {
+    "score": 70,
+    "band": "review",
+    "penalties": [
+      { "code": "missing_source", "severity": "high", "count": 1, "points": 30.0 }
+    ],
+    "gate": { "status": "fail", "reasons": ["score 70 is below min_score 85"] }
+  },
+  "gate": { "status": "fail", "reasons": ["score 70 is below min_score 85"] }
+}
+```
+
+`band` is `ready` (`score >= 85`), `review` (`score >= 60`) or `risky`
+(`score < 60`). `penalties` has one `{code, severity, count, points}` row per
+firing flag code, sorted by `points` descending and then `code`, so the score is
+explainable. `publishable` keeps its existing meaning (no high-severity flag
+remains).
+
+**Gate policy.** Add the optional fields to the workspace `config` (see
+[Workspace rules](#workspace-rules)) to enforce a threshold:
+
+| Field | Type | Effect |
+| --- | --- | --- |
+| `min_score` | int `0..100` | The gate fails when `score < min_score`. |
+| `max_high` | int `>= 0` | The gate fails when the high-severity flag count exceeds `max_high`. |
+
+Both are validated strictly: a non-integer, a negative or `min_score > 100`
+returns HTTP 400 and stores no draft. With no policy configured `gate.status` is
+`pass` and `reasons` is empty; a failing policy names each violated limit. The
+built-in `strict` profile sets `min_score = 85` and `max_high = 0`, while
+`marketing-safe` and `internal` set no gate. An inline `config` gate overrides
+the profile gate, and `rules.gate` echoes the effective policy.
+
+```sh
+curl -X POST 'http://127.0.0.1:8080/api/generate' \
+  -H 'Content-Type: application/json' \
+  -d '{"format": "csv", "content": "id,type,title,description,benefit,source\nA,fix,Fix login,Login no longer fails,Reliable access,A\n", "config": {"min_score": 80, "max_high": 0}}'
+```
+
+Download the score (one row per penalty):
+
+```sh
+curl -G 'http://127.0.0.1:8080/api/export/score.csv' \
+  --data-urlencode 'format=csv' \
+  --data-urlencode 'profile=strict' \
+  --data-urlencode $'content=id,type,title,description,benefit,source\nA,fix,Fix login,Login no longer fails,Reliable access,A\n'
+```
+
+```csv
+code,severity,count,points
+missing_required_section,medium,1,15.0
+```
+
+| Endpoint | Shape |
+| --- | --- |
+| `GET /api/export/score.csv` | `code,severity,count,points` — one row per penalty (header only when there are none). |
+| `GET /api/export/score.json` | The full `score` object as stable JSON (sorted keys, UTF-8, no `NaN`). |
+
+Both accept the same `format`, `title`, `content` (or `previous`/`current` for a
+diff), `profile`, `config` and `template` query parameters as the other exports
+and answer with a `Content-Disposition: attachment` header. Missing or invalid
+parameters return HTTP 400, unparseable content returns HTTP 422 and a body over
+2 MiB returns HTTP 413.
+
+The browser UI shows the score, a band badge, the top penalties and the gate
+status after a successful generate or diff, and adds *Download score CSV* /
+*Download score JSON* buttons built in the browser from the payload already on
+screen (no extra server round-trip). The release readiness score and gate policy
+were added in **v0.12.0**; no third-party dependency is required.
 
 ## Input format
 

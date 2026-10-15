@@ -28,6 +28,8 @@ from .exporters import (
     qa_flags_csv,
     rules_csv,
     rules_json,
+    score_csv,
+    score_json,
     template_csv,
     template_json,
     trend_csv,
@@ -80,12 +82,21 @@ _EXPORTS = {
         "application/json; charset=utf-8",
         "release-template.json",
     ),
+    "/api/export/score.csv": ("text/csv", "release-score.csv"),
+    "/api/export/score.json": (
+        "application/json; charset=utf-8",
+        "release-score.json",
+    ),
     "/api/export/draft.json": ("application/json; charset=utf-8", "release-draft.json"),
 }
 
 # Exports whose query contract accepts ``previous``/``current`` (a diff) as
 # well as ``content`` (a single draft).
 _TEMPLATE_EXPORTS = ("/api/export/template.csv", "/api/export/template.json")
+_DIFFABLE_EXPORTS = _TEMPLATE_EXPORTS + (
+    "/api/export/score.csv",
+    "/api/export/score.json",
+)
 
 # Trend exports built from repeated ``release=label:content`` query params.
 _TREND_EXPORTS = {
@@ -564,10 +575,11 @@ class Handler(BaseHTTPRequestHandler):
         """Serve a CSV or JSON export built from query parameters.
 
         The endpoints mirror ``/api/generate`` and ``/api/diff``: ``format``,
-        ``title``, ``content``, ``profile`` and ``template`` (plus
+        ``title``, ``content``, ``profile``, ``config`` and ``template`` (plus
         ``previous``/``current`` for a diff) are accepted as query parameters.
-        The template exports accept either a single draft or a diff. Missing or
-        invalid parameters return 400, while unparseable content returns 422.
+        The template and score exports accept either a single draft or a diff.
+        Missing or invalid parameters return 400, while unparseable content
+        returns 422.
         """
         query = parse_qs(parsed.query)
         fmt = _first(query, "format", "auto")
@@ -576,9 +588,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "unsupported format: {!r}".format(fmt)})
             return
         profile_name = _first(query, "profile")
+        config_raw = _first(query, "config")
+        inline_config: Any = None
+        if config_raw:
+            try:
+                inline_config = json.loads(config_raw)
+            except json.JSONDecodeError:
+                self._send_json(
+                    400, {"error": "query 'config' must be valid JSON"}
+                )
+                return
         try:
             profile_name = normalize_profile_name(profile_name)
-            workspace = resolve_config({"profile": profile_name})
+            workspace = resolve_config(
+                {"profile": profile_name, "config": inline_config}
+            )
         except UnknownProfileError as exc:
             self._send_json(400, {"error": str(exc)})
             return
@@ -608,7 +632,7 @@ class Handler(BaseHTTPRequestHandler):
                     template,
                 )
                 body = diff_csv(result)
-            elif path in _TEMPLATE_EXPORTS:
+            elif path in _DIFFABLE_EXPORTS:
                 previous = _first(query, "previous")
                 current = _first(query, "current")
                 if previous is not None and current is not None:
@@ -631,11 +655,14 @@ class Handler(BaseHTTPRequestHandler):
                     result = build_draft(
                         content, fmt, title, workspace, profile_name, template
                     )
-                body = (
-                    template_csv(result)
-                    if path.endswith(".csv")
-                    else template_json(result)
-                )
+                if path == "/api/export/score.csv":
+                    body = score_csv(result)
+                elif path == "/api/export/score.json":
+                    body = score_json(result)
+                elif path.endswith(".csv"):
+                    body = template_csv(result)
+                else:
+                    body = template_json(result)
             else:
                 content = _first(query, "content")
                 if not content or not content.strip():

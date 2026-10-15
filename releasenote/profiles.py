@@ -67,11 +67,13 @@ def _profile(name: str, description: str, config: Dict[str, Any]) -> RuleProfile
 BUILTIN_PROFILES: Dict[str, RuleProfile] = {
     "strict": _profile(
         "strict",
-        "Treats vague wording as high severity and requires a Breaking "
-        "Changes section.",
+        "Treats vague wording as high severity, requires a Breaking Changes "
+        "section and gates sign-off on the release readiness score.",
         {
             "severity_overrides": {"vague_language": "high"},
             "required_sections": ["breaking"],
+            "min_score": 85,
+            "max_high": 0,
         },
     ),
     "marketing-safe": _profile(
@@ -171,6 +173,14 @@ def _merge(base: WorkspaceConfig, inline: WorkspaceConfig) -> WorkspaceConfig:
             list(base.banned_phrases) + list(inline.banned_phrases)
         ),
         severity_overrides=overrides,
+        min_score=(
+            inline.min_score
+            if inline.min_score is not None
+            else base.min_score
+        ),
+        max_high=(
+            inline.max_high if inline.max_high is not None else base.max_high
+        ),
     )
 
 
@@ -212,8 +222,9 @@ def rule_summary(
     """Return a deterministic, JSON-serialisable summary of the effective rules.
 
     Reports the effective vague-term list, banned phrases, required sections,
-    every severity override, the resolved ``template`` and, per flag code, how
-    many flags fired and the severity they resolved to.
+    every severity override, the resolved ``template``, the effective gate
+    policy and, per flag code, how many flags fired and the severity they
+    resolved to.
     """
     config = config or WorkspaceConfig.default()
     flags = list(qa.flags)
@@ -236,6 +247,10 @@ def rule_summary(
         "flag_counts": counts,
         "flag_severities": severities,
         "total_flags": len(flags),
+        "gate": {
+            "min_score": config.min_score,
+            "max_high": config.max_high,
+        },
         "template": template_summary(template),
     }
 

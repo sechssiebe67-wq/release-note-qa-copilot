@@ -48,15 +48,18 @@ The MVP is a dependency-free Python web application:
 | Trend analysis | Analyse 2–20 ordered releases: per-release QA counts, publishability, sourced-entry ratio, vague/banned hits, consecutive deltas (`improving` / `stable` / `regressing`) and an overall verdict; render a table with SVG sparklines and export as CSV/JSON |
 | Draft comparison | Compare 2–10 complete draft payloads: per-draft QA metrics, a per-entry presence matrix (`identical` / `changed` / `unique`), a shared/unique breakdown and a deterministic publishability recommendation; export as CSV/JSON |
 | Profile comparison | QA-check one changelog under every built-in rule profile (plus an optional inline config layered on top): per-profile metrics, a delta against the baseline and a deterministic recommended profile; export as CSV/JSON |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles` |
+| Release readiness score | A single, explainable 0–100 score per draft with a `ready`/`review`/`risky` band and an optional gate policy (`min_score`, `max_high`) that yields a deterministic `pass`/`fail` ship decision; export as CSV/JSON |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
 profile* selector defaults to *none* so current behaviour is unchanged; picking
 a profile pre-fills the *Workspace rules* panel. After a successful generate it
-also offers *Download QA CSV*, *Download checklist CSV*, *Download JSON*,
-*Download rules CSV*, *Download rules JSON*, *Download template CSV* and
-*Download template JSON*; after a diff it adds *Download diff CSV*. A
+also shows the release readiness score with a band badge, the top penalties and
+the gate status, and offers *Download QA CSV*, *Download checklist CSV*,
+*Download JSON*, *Download rules CSV*, *Download rules JSON*, *Download template
+CSV*, *Download template JSON*, *Download score CSV* and *Download score JSON*;
+after a diff it adds *Download diff CSV*. A
 *Release-note template* selector is populated from `GET /api/templates` and is
 sent on generate and diff. Those downloads are built in the browser from the
 payload already on screen, so they need no extra server round-trip. When a draft has a `draft_id`
@@ -89,9 +92,10 @@ releasenote/
   trend.py      multi-release trend analysis: metrics, deltas, verdicts
   compare.py    draft comparison matrix: metrics, presence, shared/unique, recommendation
   profile_compare.py  one changelog across rule profiles: metrics, delta, recommendation
+  score.py      deterministic release readiness score, band and gate policy evaluation
   generator.py  Markdown rendering with inline QA annotations and a template layout
-  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, template, trend, comparison, profile comparison and full payload
-  service.py    parse -> group -> qa -> render pipeline (+ build_diff, build_trend, build_comparison, build_profile_comparison, reviews, shared drafts)
+  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, score, template, trend, comparison, profile comparison and full payload
+  service.py    parse -> group -> qa -> score -> render pipeline (+ build_diff, build_trend, build_comparison, build_profile_comparison, reviews, shared drafts)
   storage.py    optional append-only draft history + review/audit store
   server.py     stdlib HTTP server + JSON API + read-only share pages
   static/       single-page browser UI (draft, diff, review controls, share link)
@@ -589,6 +593,79 @@ past sign-off can be replayed against the rules that were live then) and
 org-wide profile libraries. The read-only comparison already gives reviewers the
 evidence; server-side persistence and versioning are the next step.
 
+## Release readiness score
+
+**Goal.** A reviewer looking at a draft sees individual QA flags, a checklist
+and a binary `publishable` outcome, but no graded signal for *how close is this
+draft to shippable?* and no way to enforce a team's own threshold. The **release
+readiness score** gives every generated draft a single, explainable number from
+`0` to `100`, a qualitative **band**, and an optional **gate policy** that turns
+the score into a deterministic `ship` / `hold` decision.
+
+**Intended users.** Product and release managers who need a fast, comparable
+signal across drafts, and QA reviewers who must justify a sign-off with a
+threshold they can state up front.
+
+**The score.** `releasenote.score.compute_score(qa, entries, config=None)`
+returns `{score, band, penalties, gate}` and is a pure, deterministic function
+of its inputs:
+
+- Start at `100` and subtract a fixed penalty per flag by severity
+  (`high` = 30, `medium` = 15, `low` = 5), divided by the number of entries, so a
+  one-entry draft is not punished like a fifty-entry one.
+- Clamp the result to `0..100` and round it to an integer `score`.
+- `band` is `ready` (`score >= 85`), `review` (`score >= 60`) or `risky`
+  (`score < 60`), defined by named constants.
+- `penalties` is one `{code, severity, count, points}` row per firing flag code,
+  sorted by `points` descending and then `code`, so the score is explainable:
+  summing the `points` reproduces the deduction before clamping.
+
+A draft with no flags scores `100` / `ready`; for the same entry count, many
+high-severity flags score strictly below only-medium flags.
+
+**Gate policy.** `WorkspaceConfig` gains two optional fields:
+
+| Field | Type | Effect |
+| --- | --- | --- |
+| `min_score` | int `0..100` | The draft fails the gate when `score < min_score`. |
+| `max_high` | int `>= 0` | The draft fails the gate when the high-severity flag count exceeds `max_high`. |
+
+Both are validated strictly (wrong type or out of range raises `ValueError`, the
+API reports HTTP 400), round-trip through `from_dict` / `to_dict`, and leave
+`is_default()` true only when unset. The built-in `strict` profile now sets
+`min_score = 85` and `max_high = 0`; `marketing-safe` and `internal` set no gate.
+`resolve_config` merges the profile gate with an inline gate, the inline value
+winning, and `rule_summary` echoes the effective gate.
+
+**Pipeline.** `build_draft` and `build_diff` add two keys to the payload:
+
+- `score` — the full `compute_score` result;
+- `gate` — `{status: "pass"|"fail", reasons: [...]}` computed from the effective
+  gate policy. With no policy configured `gate.status` is `pass` and `reasons`
+  is empty; a failing policy names each violated limit (score below `min_score`,
+  high count above `max_high`).
+
+`publishable` keeps its current meaning (no high-severity flag remains).
+
+**Endpoints and exports.** `releasenote.exporters.score_csv` renders
+`code,severity,count,points` (header plus one row per penalty) and
+`score_json` serialises the full `score` object as stable UTF-8 JSON.
+
+| Endpoint | Query | Response |
+| --- | --- | --- |
+| `GET /api/export/score.csv` | `format`, `title`, `content` (or `previous`/`current`), `profile`, `config`, `template` | `text/csv` with the header `code,severity,count,points`. |
+| `GET /api/export/score.json` | same as `score.csv` | The full `score` object as stable JSON. |
+
+Both answer with a `Content-Disposition: attachment` header and reuse the
+existing 400/413/422 error behaviour.
+
+**Browser UI.** After a successful generate or diff the UI shows the score and a
+band badge, lists the top penalties, shows the gate status and adds *Download
+score CSV* / *Download score JSON* buttons built from the payload already on
+screen. The feature ships in **v0.12.0** (Python package and Helm chart). No new
+third-party dependency is introduced; the standard library is still the only
+requirement.
+
 ## Release-note templates
 
 **Goal.** The Copilot has always rendered a **fixed** Markdown skeleton: a
@@ -746,6 +823,9 @@ unset. The feature ships in **v0.8.0** (Python package and Helm chart).
 - Authenticated, optionally expiring share links with per-recipient access
   control — the read-only public share view landed in **v0.8.0**; access
   control is still open.
+- Server-side, per-workspace default gate policies and score trend across
+  releases — the score and inline gate landed in **v0.12.0**; persistence is
+  still open.
 
 Per-workspace term and tone rules (was the first item in this list) landed in
 **v0.2.0** — see [Workspace configuration](#workspace-configuration).
@@ -771,6 +851,9 @@ Release-note templates with section ordering, intro/outro and a
 Side-by-side QA rule profile comparison with per-profile deltas and a
 deterministic recommended profile landed in **v0.11.0** — see
 [Profile comparison](#profile-comparison).
+The release readiness score with explainable penalties and an optional
+`min_score` / `max_high` ship-and-hold gate policy landed in **v0.12.0** — see
+[Release readiness score](#release-readiness-score).
 
 ## Success signals
 

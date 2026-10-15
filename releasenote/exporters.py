@@ -24,6 +24,7 @@ QA_FLAG_HEADER = ("entry_id", "code", "severity", "message")
 CHECKLIST_HEADER = ("label", "status", "detail")
 DIFF_HEADER = ("category", "id", "title", "type", "reason")
 RULES_HEADER = ("code", "severity", "count")
+SCORE_HEADER = ("code", "severity", "count", "points")
 TEMPLATE_HEADER = ("section", "title", "required", "entry_count")
 TREND_HEADER = (
     "label",
@@ -169,6 +170,39 @@ def rules_json(payload: Mapping[str, Any]) -> str:
     rules = _as_mapping(_as_mapping(payload).get("rules"))
     return json.dumps(
         rules,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
+def score_csv(payload: Mapping[str, Any]) -> str:
+    """Return one CSV row per penalty: ``code,severity,count,points``.
+
+    The rows come from the ``score`` object produced by
+    :func:`releasenote.score.compute_score`. A draft with no flags yields just
+    the header row, so the shape is always stable.
+    """
+    score = _as_mapping(_as_mapping(payload).get("score"))
+    rows = []
+    for item in _as_list(score.get("penalties")):
+        penalty = _as_mapping(item)
+        rows.append(
+            (
+                penalty.get("code", ""),
+                penalty.get("severity", ""),
+                penalty.get("count", 0),
+                penalty.get("points", 0),
+            )
+        )
+    return _render_csv(SCORE_HEADER, rows)
+
+
+def score_json(payload: Mapping[str, Any]) -> str:
+    """Serialise the full ``score`` object as stable, UTF-8 JSON without NaN."""
+    score = _as_mapping(_as_mapping(payload).get("score"))
+    return json.dumps(
+        score,
         ensure_ascii=False,
         sort_keys=True,
         allow_nan=False,
@@ -406,6 +440,7 @@ __all__ = [
     "CHECKLIST_HEADER",
     "DIFF_HEADER",
     "RULES_HEADER",
+    "SCORE_HEADER",
     "TEMPLATE_HEADER",
     "TREND_HEADER",
     "COMPARISON_HEADER",
@@ -417,6 +452,8 @@ __all__ = [
     "diff_csv",
     "rules_csv",
     "rules_json",
+    "score_csv",
+    "score_json",
     "template_csv",
     "template_json",
     "trend_csv",
