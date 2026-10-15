@@ -18,6 +18,9 @@ from . import __version__
 from .config import WorkspaceConfig
 from .exporters import (
     checklist_csv,
+    comparison_csv,
+    comparison_json,
+    comparison_matrix_csv,
     diff_csv,
     draft_json,
     qa_flags_csv,
@@ -35,6 +38,7 @@ from .profiles import (
 )
 from .service import (
     HistoryRequiredError,
+    build_comparison,
     build_diff,
     build_draft,
     build_trend,
@@ -42,6 +46,7 @@ from .service import (
     get_shared_draft,
     record_review,
     sample,
+    sample_comparison,
     sample_trend,
     sample_workspace_config,
 )
@@ -67,6 +72,19 @@ _TREND_EXPORTS = {
     "/api/export/trend.json": (
         "application/json; charset=utf-8",
         "release-trend.json",
+    ),
+}
+
+# Comparison exports built from repeated ``draft=label:content`` query params.
+_COMPARE_EXPORTS = {
+    "/api/export/comparison.csv": ("text/csv", "draft-comparison.csv"),
+    "/api/export/comparison.json": (
+        "application/json; charset=utf-8",
+        "draft-comparison.json",
+    ),
+    "/api/export/comparison-matrix.csv": (
+        "text/csv",
+        "draft-comparison-matrix.csv",
     ),
 }
 _FORMATS = ("auto", "csv", "json")
@@ -292,6 +310,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/trend/sample":
             self._send_json(200, sample_trend())
             return
+        if path == "/api/compare/sample":
+            self._send_json(200, sample_comparison())
+            return
         if path == "/api/history":
             store = getattr(self.server, "store", None)
             query = parse_qs(parsed.query)
@@ -328,6 +349,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in _TREND_EXPORTS:
             self._handle_trend_export(path, parsed)
+            return
+        if path in _COMPARE_EXPORTS:
+            self._handle_compare_export(path, parsed)
             return
         if path in _EXPORTS:
             self._handle_export(path, parsed)
@@ -377,6 +401,61 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = trend_csv(report) if path.endswith(".csv") else trend_json(report)
         content_type, filename = _TREND_EXPORTS[path]
+        self._send(
+            200,
+            body.encode("utf-8"),
+            content_type,
+            {"Content-Disposition": 'attachment; filename="{}"'.format(filename)},
+        )
+
+    def _handle_compare_export(self, path: str, parsed: Any) -> None:
+        """Serve a comparison CSV/JSON export built from query parameters.
+
+        Each repeated ``draft`` parameter is ``label:content`` (URL-encoded);
+        an optional ``format`` applies to every draft and an optional
+        ``profile`` selects a named rule profile. Missing or invalid parameters
+        return 400, an unknown profile returns 400 naming it and unparseable
+        content returns 422.
+        """
+        query = parse_qs(parsed.query)
+        fmt = _first(query, "format", "auto")
+        if fmt not in _FORMATS:
+            self._send_json(400, {"error": "unsupported format: {!r}".format(fmt)})
+            return
+        raw_drafts = query.get("draft") or []
+        drafts = []
+        for value in raw_drafts:
+            label, separator, content = value.partition(":")
+            if not separator or not content.strip():
+                self._send_json(
+                    400, {"error": "each 'draft' must be 'label:content'"}
+                )
+                return
+            drafts.append(
+                {"label": label.strip(), "content": content, "format": fmt}
+            )
+        payload = {
+            "drafts": drafts,
+            "profile": _first(query, "profile"),
+        }
+        try:
+            report = build_comparison(payload)
+        except UnknownProfileError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        if path == "/api/export/comparison.csv":
+            body = comparison_csv(report)
+        elif path == "/api/export/comparison-matrix.csv":
+            body = comparison_matrix_csv(report)
+        else:
+            body = comparison_json(report)
+        content_type, filename = _COMPARE_EXPORTS[path]
         self._send(
             200,
             body.encode("utf-8"),
@@ -562,7 +641,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
-        if path not in ("/api/generate", "/api/diff", "/api/review", "/api/trend"):
+        if path not in (
+            "/api/generate",
+            "/api/diff",
+            "/api/review",
+            "/api/trend",
+            "/api/compare",
+        ):
             self._send_json(404, {"error": "not found", "path": parsed.path})
             return
         payload = self._parse_body()
@@ -573,6 +658,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/trend":
             self._post_trend(payload)
+            return
+        if path == "/api/compare":
+            self._post_compare(payload)
             return
         resolved = self._resolve_request(payload)
         if resolved is None:
@@ -621,6 +709,20 @@ class Handler(BaseHTTPRequestHandler):
     def _post_trend(self, payload: Dict[str, Any]) -> None:
         try:
             result = build_trend(payload)
+        except UnknownProfileError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        self._send_json(200, result)
+
+    def _post_compare(self, payload: Dict[str, Any]) -> None:
+        try:
+            result = build_comparison(payload)
         except UnknownProfileError as exc:
             self._send_json(400, {"error": str(exc)})
             return

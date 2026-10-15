@@ -115,6 +115,17 @@ def _clean(value: Any) -> str:
     return str(value).strip()
 
 
+def explicit_id(record: Dict[str, Any]) -> str:
+    """Return the record's explicit id alias, or ``""`` when none is present.
+
+    :func:`_entry_from_record` synthesises a positional ``entry-N`` id for
+    records that carry no real id, so callers that need the *real* identity
+    (such as the comparison matrix keys) must consult this instead of trusting
+    ``ChangeEntry.id``.
+    """
+    return _clean(_canonical_keys(record).get("id"))
+
+
 def _entry_from_record(record: Dict[str, Any], index: int) -> ChangeEntry:
     data = _canonical_keys(record)
     entry = ChangeEntry(

@@ -15,6 +15,9 @@ unsupported claims are flagged before publishing.
 - Attach a named, reusable **QA rule profile** and see which rules were
   effective and which fired.
 - Diff two releases to highlight regressions and repeated claims.
+- Compare **2–10 candidate drafts** side by side: per-draft QA metrics, a
+  per-entry presence matrix (`identical` / `changed` / `unique`), a shared vs.
+  unique breakdown and a deterministic publishability recommendation.
 - Export Markdown for Confluence, GitHub Releases or e-mail, and the QA flags,
   checklist and diff as CSV / JSON for spreadsheets and tooling.
 - Hand a draft to a colleague with a read-only share link (`/s/<draft_id>`)
@@ -49,6 +52,7 @@ Configuration:
 | GET | `/api/config/sample` | Example workspace-rules config |
 | GET | `/api/profiles` | Built-in QA rule profiles (`name`, `description`, `config`) |
 | GET | `/api/trend/sample` | Example 3-release trend payload |
+| GET | `/api/compare/sample` | Example 2-draft comparison payload |
 | GET | `/api/export/qa.csv` | QA flags as CSV (`entry_id,code,severity,message`) |
 | GET | `/api/export/checklist.csv` | QA checklist as CSV (`label,status,detail`) |
 | GET | `/api/export/diff.csv` | Release diff as CSV (`category,id,title,type,reason`) |
@@ -56,6 +60,9 @@ Configuration:
 | GET | `/api/export/rules.json` | Effective rule summary as JSON |
 | GET | `/api/export/trend.csv` | Multi-release trend as CSV |
 | GET | `/api/export/trend.json` | Multi-release trend as JSON |
+| GET | `/api/export/comparison.csv` | Draft comparison per-draft metrics as CSV |
+| GET | `/api/export/comparison.json` | Full draft comparison report as JSON |
+| GET | `/api/export/comparison-matrix.csv` | Draft comparison presence matrix as CSV |
 | GET | `/api/export/draft.json` | Full draft payload as JSON |
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
@@ -66,6 +73,7 @@ Configuration:
 | POST | `/api/diff` | Compare a previous and a current draft |
 | POST | `/api/review` | Record an approve / reject / reset transition |
 | POST | `/api/trend` | Analyse an ordered list of 2–20 releases |
+| POST | `/api/compare` | Compare 2–10 candidate drafts |
 
 `POST /api/generate` body:
 
@@ -443,6 +451,81 @@ buttons. Both buttons are built in the browser from the returned payload and
 emit exactly the same bytes as `GET /api/export/trend.csv` / `.json` (Python's
 `True`/`False` and `1.0`/`0.0` text, sorted JSON keys). Trend analysis was
 added in **v0.7.0**; no third-party dependency is required.
+
+## Comparing drafts
+
+The pairwise diff and the trend cannot answer *"which of these N candidate
+drafts is the most publishable, and what is unique to each?"*. `POST
+/api/compare` takes **2–10** complete drafts (each `{label, content, format}`,
+the same shape as the trend input), QA-checks each with the same rules as
+`POST /api/generate`, and returns a deterministic, offline comparison matrix.
+
+```json
+{
+  "drafts": [
+    { "label": "branch-a", "format": "csv", "content": "id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports in one click,Saves time,REL-1\n" },
+    { "label": "branch-b", "format": "csv", "content": "id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports in one click,One-click export saves time,REL-1\n" }
+  ],
+  "profile": "strict",
+  "config": {}
+}
+```
+
+The response contains the per-draft rows (`label`, `entry_count`, `counts`,
+`publishable`, `sourced_ratio`, `vague_hits`, `banned_hits` — the same metrics
+the trend table uses), the resolved `config` and `profile`, plus:
+
+- `matrix` — one row per distinct entry, keyed by normalized `id` first and
+  then normalized title: `{key, id, title, type, presence}`, where
+  `presence[label]` is `identical` (byte-identical to the first draft that
+  contained it), `changed` (present with different fields) or `unique` (present
+  in exactly one draft).
+- `shared` — the entry keys present in every draft.
+- `unique` — a `label → [entry keys]` mapping of entries that appear only in
+  that draft.
+- `recommendation` — `{label, reason}`.
+
+The recommendation is deterministic: the draft with the **fewest `high`
+flags**, then the **fewest `total` flags**, then the **highest
+`sourced_ratio`**, then the earliest input position (the same ordering rule the
+trend module uses).
+
+Bad input behaves like the rest of the API: 0, 1 or 11 drafts, a missing
+`content`, a non-object draft, a non-object body or an invalid `config` returns
+HTTP 400, an unknown `profile` returns HTTP 400 naming it, and unparseable
+content returns HTTP 422. None of these stores a draft.
+
+Download the report directly (each repeated `draft` is `label:content`,
+URL-encoded):
+
+```sh
+curl -G 'http://127.0.0.1:8080/api/export/comparison.csv' \
+  --data-urlencode 'format=csv' \
+  --data-urlencode $'draft=branch-a:id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports in one click,Saves time,REL-1\n' \
+  --data-urlencode $'draft=branch-b:id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports in one click,One-click export saves time,REL-1\n'
+```
+
+```csv
+label,entry_count,high,medium,low,total,publishable,sourced_ratio,vague_hits,banned_hits
+branch-a,1,0,0,0,0,True,1.0,0,0
+branch-b,1,0,0,0,0,True,1.0,0,0
+```
+
+`GET /api/export/comparison-matrix.csv` returns the presence matrix with the
+header `key,id,title,type,<label1>,<label2>,…` — one column per draft label in
+input order, one row per matrix entry, cells `identical` / `changed` / `unique`
+or empty. `GET /api/export/comparison.json` returns the full report as JSON
+(sorted keys, UTF-8, no `NaN`). All three accept an optional `profile` and
+answer with a `Content-Disposition: attachment` header.
+
+The browser UI adds a *Compare* section: one draft per block (a label line then
+its CSV/JSON content, blocks separated by a blank line), a per-draft metrics
+table, the presence matrix, the shared/unique breakdown, a recommendation badge
+and the *Download comparison CSV* / *Download comparison JSON* / *Download
+matrix CSV* buttons. The buttons are built in the browser from the returned
+payload and emit exactly the same bytes as the corresponding export endpoints.
+Draft comparison was added in **v0.9.0**; no third-party dependency is
+required.
 
 ## Input format
 

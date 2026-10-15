@@ -35,6 +35,11 @@ TREND_HEADER = (
     "banned_hits",
 )
 
+# The comparison per-draft table reuses the trend schema so spreadsheets keep
+# one shape; the matrix adds the per-draft presence columns after these.
+COMPARISON_HEADER = TREND_HEADER
+COMPARISON_MATRIX_HEADER = ("key", "id", "title", "type")
+
 # Canonical order of the diff categories, matching the server payload.
 DIFF_CATEGORIES = (
     "added",
@@ -201,12 +206,83 @@ def draft_json(payload: Mapping[str, Any]) -> str:
     )
 
 
+def comparison_csv(report: Mapping[str, Any]) -> str:
+    """Return one CSV row per draft: the documented trend header.
+
+    Header: ``label,entry_count,high,medium,low,total,publishable,
+    sourced_ratio,vague_hits,banned_hits`` — the same schema as
+    :func:`trend_csv` so spreadsheets keep one shape. A report without a
+    ``drafts`` list yields just the header row.
+    """
+    rows = []
+    for item in _as_list(_as_mapping(report).get("drafts")):
+        draft = _as_mapping(item)
+        counts = _as_mapping(draft.get("counts"))
+        rows.append(
+            (
+                draft.get("label", ""),
+                draft.get("entry_count", 0),
+                counts.get("high", 0),
+                counts.get("medium", 0),
+                counts.get("low", 0),
+                counts.get("total", 0),
+                draft.get("publishable", False),
+                draft.get("sourced_ratio", 0.0),
+                draft.get("vague_hits", 0),
+                draft.get("banned_hits", 0),
+            )
+        )
+    return _render_csv(COMPARISON_HEADER, rows)
+
+
+def comparison_matrix_csv(report: Mapping[str, Any]) -> str:
+    """Return the presence matrix as CSV.
+
+    Header: ``key,id,title,type,<label1>,<label2>,…`` — one column per draft
+    label in input order, one row per matrix entry. Cells hold ``identical`` /
+    ``changed`` / ``unique`` or are empty when the entry is absent from that
+    draft.
+    """
+    data = _as_mapping(report)
+    labels = [
+        _as_mapping(item).get("label", "")
+        for item in _as_list(data.get("drafts"))
+    ]
+    header = list(COMPARISON_MATRIX_HEADER) + labels
+    rows = []
+    for item in _as_list(data.get("matrix")):
+        entry = _as_mapping(item)
+        presence = _as_mapping(entry.get("presence"))
+        rows.append(
+            [
+                entry.get("key", ""),
+                entry.get("id", ""),
+                entry.get("title", ""),
+                entry.get("type", ""),
+            ]
+            + [presence.get(label, "") for label in labels]
+        )
+    return _render_csv(header, rows)
+
+
+def comparison_json(report: Mapping[str, Any]) -> str:
+    """Serialise a comparison report as stable, UTF-8 JSON without NaN."""
+    return json.dumps(
+        report,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
 __all__ = [
     "QA_FLAG_HEADER",
     "CHECKLIST_HEADER",
     "DIFF_HEADER",
     "RULES_HEADER",
     "TREND_HEADER",
+    "COMPARISON_HEADER",
+    "COMPARISON_MATRIX_HEADER",
     "DIFF_CATEGORIES",
     "qa_flags_csv",
     "checklist_csv",
@@ -216,4 +292,7 @@ __all__ = [
     "trend_csv",
     "trend_json",
     "draft_json",
+    "comparison_csv",
+    "comparison_matrix_csv",
+    "comparison_json",
 ]

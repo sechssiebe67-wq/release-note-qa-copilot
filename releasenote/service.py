@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 
+from .compare import compute_comparison
 from .config import WorkspaceConfig, sample_config
 from .diff import compute_diff
 from .generator import render_markdown
@@ -190,6 +191,29 @@ def build_trend(payload: Dict[str, Any]) -> Dict[str, Any]:
     return report
 
 
+def build_comparison(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate ``payload`` and return a draft comparison matrix.
+
+    ``payload`` carries a ``drafts`` list of 2–10 ``{label, content, format}``
+    objects plus the optional ``profile`` and ``config`` fields. The resolved
+    config and the resolved profile name are echoed back alongside the report.
+
+    Raises :class:`ValueError` for a malformed payload, a draft count outside
+    2–10, empty content or an invalid config,
+    :class:`releasenote.profiles.UnknownProfileError` for an unknown profile
+    and :class:`releasenote.importer.ParseError` for unparseable content.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+    drafts = payload.get("drafts")
+    workspace = resolve_config(payload)
+    profile_name = normalize_profile_name(payload.get("profile"))
+    report = compute_comparison(drafts, workspace)
+    report["config"] = workspace.to_dict()
+    report["profile"] = profile_name
+    return report
+
+
 def sample(fmt: str = "csv") -> Dict[str, str]:
     """Return example content for the UI and API."""
     fmt = (fmt or "csv").strip().lower()
@@ -246,6 +270,45 @@ def sample_trend() -> Dict[str, Any]:
                     "Correct local times,REL-2\n"
                     "REL-3,feature,Search filters,Filter search results by team,"
                     "Relevant results only,REL-3\n"
+                ),
+            },
+        ]
+    }
+
+
+def sample_comparison() -> Dict[str, Any]:
+    """Return a two-draft example payload for ``GET /api/compare/sample``.
+
+    ``branch-a`` and ``branch-b`` share one identical entry, branch a has one
+    unique entry, branch b has one unique entry and ``REL-1`` is ``changed``
+    between the two, so the sample exercises every presence state.
+    """
+    return {
+        "drafts": [
+            {
+                "label": "branch-a",
+                "format": "csv",
+                "content": (
+                    "id,type,title,description,benefit,source\n"
+                    "REL-1,feature,Bulk export,Export all reports in one click,"
+                    "Saves time per report,REL-1\n"
+                    "REL-2,fix,Timezone fix,Timestamps render locally,"
+                    "Correct local times,REL-2\n"
+                    "REL-4,fix,Retry logic,Retries transient failures,"
+                    "Stable uploads,REL-4\n"
+                ),
+            },
+            {
+                "label": "branch-b",
+                "format": "csv",
+                "content": (
+                    "id,type,title,description,benefit,source\n"
+                    "REL-1,feature,Bulk export,Export all reports in one click,"
+                    "One-click export saves time,REL-1\n"
+                    "REL-3,feature,Search filters,Filter results by team,"
+                    "Relevant results only,REL-3\n"
+                    "REL-4,fix,Retry logic,Retries transient failures,"
+                    "Stable uploads,REL-4\n"
                 ),
             },
         ]
