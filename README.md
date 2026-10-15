@@ -13,7 +13,8 @@ unsupported claims are flagged before publishing.
 - Tailor the QA rules per workspace (extra/allowed terms, banned phrases,
   required sections, severity overrides).
 - Diff two releases to highlight regressions and repeated claims.
-- Export Markdown for Confluence, GitHub Releases or e-mail.
+- Export Markdown for Confluence, GitHub Releases or e-mail, and the QA flags,
+  checklist and diff as CSV / JSON for spreadsheets and tooling.
 
 See [CONCEPT.md](CONCEPT.md) for the product goal, users and roadmap.
 
@@ -42,6 +43,10 @@ Configuration:
 | GET | `/api/version` | Product name and version |
 | GET | `/api/sample?format=csv\|json` | Example import payload |
 | GET | `/api/config/sample` | Example workspace-rules config |
+| GET | `/api/export/qa.csv` | QA flags as CSV (`entry_id,code,severity,message`) |
+| GET | `/api/export/checklist.csv` | QA checklist as CSV (`label,status,detail`) |
+| GET | `/api/export/diff.csv` | Release diff as CSV (`category,id,title,type,reason`) |
+| GET | `/api/export/draft.json` | Full draft payload as JSON |
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
 | POST | `/api/generate` | Build a draft |
@@ -142,6 +147,50 @@ Invalid bodies behave like `/api/generate`: malformed JSON or a missing
 `previous`/`current` field returns HTTP 400, an unparseable payload returns
 HTTP 422, a body over 2 MiB returns HTTP 413, and an invalid `config` returns
 HTTP 400 without storing a draft. The release diff was added in **v0.3.0**.
+
+## Exporting QA data
+
+Beyond the Markdown draft, the QA result and diff can be downloaded as CSV or
+JSON from the UI (the *Download QA CSV*, *Download checklist CSV*, *Download
+JSON* and *Download diff CSV* buttons appear after a successful generate/diff)
+or fetched directly from the API. The export endpoints accept the same
+`format`, `title` and `content` query parameters as `POST /api/generate`, plus
+`previous` and `current` for `diff.csv`. They answer with `text/csv` or
+`application/json` and a `Content-Disposition: attachment; filename=...`
+header; missing or invalid parameters return HTTP 400 and unparseable content
+returns HTTP 422.
+
+| Endpoint | CSV columns / JSON shape |
+| --- | --- |
+| `GET /api/export/qa.csv` | `entry_id,code,severity,message` — one row per flag. |
+| `GET /api/export/checklist.csv` | `label,status,detail` — one row per checklist item. |
+| `GET /api/export/diff.csv` | `category,id,title,type,reason` — one row per item, `category` ∈ `added`, `changed`, `removed`, `unchanged`, `repeated_claims`, `regressions`. |
+| `GET /api/export/draft.json` | The full payload as JSON (stable key order, UTF-8, no `NaN`). |
+
+CSV uses `\n` line endings and quotes any field containing a comma, quote or
+newline, so it round-trips through `csv.reader`. Example:
+
+```sh
+curl -G 'http://127.0.0.1:8080/api/export/qa.csv' \
+  --data-urlencode 'format=csv' \
+  --data-urlencode $'content=id,type,title,description,benefit,source\nREL-104,feature,Better dashboard,The dashboard is improved,A much better experience,REL-104\n'
+```
+
+```csv
+entry_id,code,severity,message
+REL-104,vague_language,medium,"Vague wording without measurable meaning: better, improved."
+```
+
+The diff export also needs `previous`:
+
+```sh
+curl -G 'http://127.0.0.1:8080/api/export/diff.csv' \
+  --data-urlencode 'format=csv' \
+  --data-urlencode $'previous=id,type,title,description,benefit,source\nA,fix,Bug,Bug,Quick,A\n' \
+  --data-urlencode $'current=id,type,title,description,benefit,source\nA,fix,Bug,Bug,Quick,\n'
+```
+
+The export capability was added in **v0.4.0**.
 
 ## Input format
 

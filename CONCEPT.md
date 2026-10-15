@@ -15,7 +15,8 @@ to write marketing copy; it makes the draft **traceable and checkable**:
 - attach each entry to its source/reference,
 - flag vague, unsupported or incomplete claims,
 - produce a short QA checklist for release approval,
-- export the draft as Markdown (Confluence, GitHub Releases, e-mail).
+- export the draft as Markdown (Confluence, GitHub Releases, e-mail) and the
+  QA, checklist and diff data as CSV / JSON for spreadsheets and tooling.
 
 ## Intended users
 
@@ -37,13 +38,17 @@ The MVP is a dependency-free Python web application:
 | QA | Flags missing source, vague language, unsupported quantified claims, missing benefit, undocumented breaking changes |
 | Checklist | Five pass/warn/fail checks plus a publishability verdict |
 | Diff | Compare two drafts: added / changed / removed / unchanged entries, repeated claims and regressions |
-| Export | Markdown download; JSON API for automation |
+| Export | Markdown download plus CSV/JSON downloads of QA flags, checklist, diff and the full draft; `GET /api/export/*` for automation |
 | History | Optional file-backed store of generated drafts (`DATA_DIR`) |
 | Workspace rules | Per-workspace JSON config: extra/allowed vague terms, banned phrases, required sections, severity overrides |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/history`, `POST /api/generate`, `POST /api/diff` |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/history`, `POST /api/generate`, `POST /api/diff` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
-data, generate, inspect QA flags and copy/download the Markdown.
+data, generate, inspect QA flags and copy/download the Markdown. After a
+successful generate it also offers *Download QA CSV*, *Download checklist CSV*
+and *Download JSON*; after a diff it adds *Download diff CSV*. Those downloads
+are built in the browser from the payload already on screen, so they need no
+extra server round-trip.
 
 ## Architecture
 
@@ -56,6 +61,7 @@ releasenote/
   qa.py         heuristic QA rules, workspace overrides and checklist
   diff.py       compare two drafts: classification, repeated claims, regressions
   generator.py  Markdown rendering with inline QA annotations
+  exporters.py  CSV / JSON rendering of qa, checklist, diff and full payload
   service.py    parse -> group -> qa -> render pipeline (+ build_diff)
   storage.py    optional append-only draft history
   server.py     stdlib HTTP server + JSON API
@@ -174,6 +180,34 @@ new QA flags are merged into the current draft's `qa` result and honour
 the overridden severity in the response. The feature ships in **v0.3.0**
 (Python package and Helm chart).
 
+## Export
+
+Reviewers who track findings in a spreadsheet or feed a release into other
+tooling need the QA result as data, not just as a rendered page.
+`releasenote.exporters` turns the payload returned by `build_draft` /
+`build_diff` into CSV and JSON strings with pure functions (no I/O), and the
+server exposes them under `GET /api/export/*`:
+
+| Endpoint | Payload | Columns / shape |
+| --- | --- | --- |
+| `GET /api/export/qa.csv` | `build_draft` | `entry_id,code,severity,message` — one row per QA flag. |
+| `GET /api/export/checklist.csv` | `build_draft` | `label,status,detail` — one row per checklist item. |
+| `GET /api/export/diff.csv` | `build_diff` | `category,id,title,type,reason` — one row per diff item, `category` ∈ `added`, `changed`, `removed`, `unchanged`, `repeated_claims`, `regressions`. |
+| `GET /api/export/draft.json` | `build_draft` | The full payload as JSON (stable key order, UTF-8, no `NaN`). |
+
+The endpoints accept the same `format`, `title` and `content` query parameters
+as `POST /api/generate`, plus `previous` and `current` for `diff.csv`. They
+reply with `text/csv` or `application/json` and a
+`Content-Disposition: attachment; filename=...` header. Missing or invalid
+parameters return HTTP 400 and unparseable content returns HTTP 422. CSV uses
+`\n` line endings and quotes any field containing a comma, quote or newline, so
+it round-trips through standard parsers.
+
+The browser UI builds the same CSV/JSON strings from the payload it already
+holds (`Blob` + `URL.createObjectURL`) and shows the download buttons only
+after a successful generate or diff. The feature ships in **v0.4.0** (Python
+package and Helm chart).
+
 ## Deployment contract
 
 - Docker image builds for `linux/amd64` and `linux/arm64`, serves HTTP on port
@@ -200,6 +234,8 @@ Per-workspace term and tone rules (was the first item in this list) landed in
 **v0.2.0** — see [Workspace configuration](#workspace-configuration).
 Diffing two releases to highlight regressions and repeated claims (was the
 second item) landed in **v0.3.0** — see [Release diff](#release-diff).
+Machine-readable CSV / JSON export of the QA result and diff landed in
+**v0.4.0** — see [Export](#export).
 
 ## Success signals
 

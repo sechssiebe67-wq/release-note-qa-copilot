@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .config import WorkspaceConfig
+from .exporters import checklist_csv, diff_csv, draft_json, qa_flags_csv
 from .importer import ParseError
 from .service import build_diff, build_draft, sample, sample_workspace_config
 from .storage import DraftStore
@@ -22,6 +23,23 @@ from .storage import DraftStore
 MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MiB upload cap.
 MAX_DRAIN_BYTES = 8 * 1024 * 1024  # Bounded read of an over-limit body.
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+# Export endpoints and the (mime type, filename) each one serves.
+_EXPORTS = {
+    "/api/export/qa.csv": ("text/csv", "qa-flags.csv"),
+    "/api/export/checklist.csv": ("text/csv", "qa-checklist.csv"),
+    "/api/export/diff.csv": ("text/csv", "release-diff.csv"),
+    "/api/export/draft.json": ("application/json; charset=utf-8", "release-draft.json"),
+}
+_FORMATS = ("auto", "csv", "json")
+
+
+def _first(query: Dict[str, list], key: str, default: Optional[str] = None) -> Optional[str]:
+    """Return the first value for ``key`` in a parsed query string."""
+    values = query.get(key)
+    if not values:
+        return default
+    return values[0]
 
 
 def _read_static(name: str) -> bytes:
@@ -132,7 +150,62 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(200, record)
             return
+        if path in _EXPORTS:
+            self._handle_export(path, parsed)
+            return
         self._send_json(404, {"error": "not found", "path": parsed.path})
+
+    def _handle_export(self, path: str, parsed: Any) -> None:
+        """Serve a CSV or JSON export built from query parameters.
+
+        The endpoints mirror ``/api/generate`` and ``/api/diff``: ``format``,
+        ``title`` and ``content`` (plus ``previous``/``current`` for the diff
+        export) are accepted as query parameters. Missing or invalid
+        parameters return 400, while unparseable content returns 422.
+        """
+        query = parse_qs(parsed.query)
+        fmt = _first(query, "format", "auto")
+        title = _first(query, "title", "Release Notes")
+        if fmt not in _FORMATS:
+            self._send_json(400, {"error": "unsupported format: {!r}".format(fmt)})
+            return
+        try:
+            if path == "/api/export/diff.csv":
+                previous = _first(query, "previous")
+                current = _first(query, "current")
+                if not previous or not previous.strip():
+                    self._send_json(400, {"error": "query 'previous' is required"})
+                    return
+                if not current or not current.strip():
+                    self._send_json(400, {"error": "query 'current' is required"})
+                    return
+                result = build_diff(previous, current, fmt, title)
+                body = diff_csv(result)
+            else:
+                content = _first(query, "content")
+                if not content or not content.strip():
+                    self._send_json(400, {"error": "query 'content' is required"})
+                    return
+                result = build_draft(content, fmt, title)
+                if path == "/api/export/qa.csv":
+                    body = qa_flags_csv(result)
+                elif path == "/api/export/checklist.csv":
+                    body = checklist_csv(result)
+                else:
+                    body = draft_json(result)
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": "invalid config: {}".format(exc)})
+            return
+        content_type, filename = _EXPORTS[path]
+        self._send(
+            200,
+            body.encode("utf-8"),
+            content_type,
+            {"Content-Disposition": 'attachment; filename="{}"'.format(filename)},
+        )
 
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
