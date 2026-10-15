@@ -43,7 +43,8 @@ The MVP is a dependency-free Python web application:
 | Review workflow | Mark a draft `pending` / `approved` / `rejected` with reviewer + comment; every transition appended to an append-only audit log; in-memory fallback when `DATA_DIR` is unset |
 | Workspace rules | Per-workspace JSON config: extra/allowed vague terms, banned phrases, required sections, severity overrides |
 | QA rule profiles | Named, reusable rule sets (`strict`, `marketing-safe`, `internal`) that bundle a `WorkspaceConfig` with a description; attach a profile to a draft and get an effective-rule summary |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/history`, `GET /api/review/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review` |
+| Trend analysis | Analyse 2–20 ordered releases: per-release QA counts, publishability, sourced-entry ratio, vague/banned hits, consecutive deltas (`improving` / `stable` / `regressing`) and an overall verdict; render a table with SVG sparklines and export as CSV/JSON |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/trend/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/history`, `GET /api/review/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
@@ -52,7 +53,10 @@ a profile pre-fills the *Workspace rules* panel. After a successful generate it
 also offers *Download QA CSV*, *Download checklist CSV*, *Download JSON*,
 *Download rules CSV* and *Download rules JSON*; after a diff it adds *Download
 diff CSV*. Those downloads are built in the browser from the payload already on
-screen, so they need no extra server round-trip.
+screen, so they need no extra server round-trip. A *Trend* section accepts one
+release per block, renders the per-release table, inline SVG sparklines for the
+total flag count and sourced ratio and a verdict badge per delta, and exposes
+*Download trend CSV* / *Download trend JSON* after a successful analysis.
 
 ## Architecture
 
@@ -65,8 +69,9 @@ releasenote/
   grouping.py   bucketing by change type
   qa.py         heuristic QA rules, workspace overrides and checklist
   diff.py       compare two drafts: classification, repeated claims, regressions
+  trend.py      multi-release trend analysis: metrics, deltas, verdicts
   generator.py  Markdown rendering with inline QA annotations
-  exporters.py  CSV / JSON rendering of qa, checklist, diff and full payload
+  exporters.py  CSV / JSON rendering of qa, checklist, diff, trend and full payload
   service.py    parse -> group -> qa -> render pipeline (+ build_diff, reviews)
   storage.py    optional append-only draft history + review/audit store
   server.py     stdlib HTTP server + JSON API
@@ -323,6 +328,78 @@ HTTP 422. The UI adds a profile selector and the *Download rules CSV* /
 *Download rules JSON* buttons. The feature ships in **v0.6.0** (Python package
 and Helm chart).
 
+## Multi-release trend analysis
+
+A single draft answers "is *this* release fine?" and a diff answers "what
+changed since the last one?", but a release manager still cannot answer "is our
+release quality getting better or worse over the last N releases?" without
+exporting CSVs and building a spreadsheet by hand. The trend analysis answers
+that question directly and deterministically, entirely offline.
+
+**Goal.** Given an **ordered list of releases**, produce a compact report of
+per-release QA metrics plus the direction of travel between consecutive
+releases, so a team can see at a glance whether quality is improving, holding
+steady or slipping.
+
+**Input.** An ordered list of `2–20` release payloads, each
+`{"label": str, "content": str, "format": "auto"|"csv"|"json"}`. Every content
+string is parsed with `importer.parse_entries` and QA-checked with
+`qa.analyze_entries` under the resolved `config` / `profile`, so a release in
+the trend scores exactly like the same content through `POST /api/generate`.
+
+**Output.** A JSON-serialisable report:
+
+```json
+{
+  "releases": [
+    {"label": "2026.1", "entry_count": 2,
+     "counts": {"high": 2, "medium": 1, "low": 0, "total": 3},
+     "publishable": false, "sourced_ratio": 0.0,
+     "vague_hits": 1, "banned_hits": 0}
+  ],
+  "deltas": [
+    {"from": "2026.1", "to": "2026.2", "high": -2, "medium": -1, "total": -2,
+     "sourced_ratio": 1.0, "verdict": "improving"}
+  ],
+  "overall": {"verdict": "improving", "best": "2026.3", "worst": "2026.1"}
+}
+```
+
+Each release carries its `label`, `entry_count`, `counts` (high/medium/low/
+total), `publishable`, `sourced_ratio` (fraction of entries with a source or
+link; `0.0` when there are no entries) and the `vague_hits` / `banned_hits`
+counts. Each delta is the signed change between two consecutive releases plus a
+**verdict**.
+
+**Verdict rule (deterministic).** Compare the `high` count first, then `total`,
+then `sourced_ratio`; a release is `improving` if it is strictly better on the
+first metric that differs, `regressing` if strictly worse, and `stable` when
+every compared metric is equal. The `overall` verdict applies the same rule
+from the first to the last release; `best` and `worst` are the releases with
+the strongest and weakest metrics.
+
+**Endpoints.**
+
+| Endpoint | Body / query | Response |
+| --- | --- | --- |
+| `POST /api/trend` | `{"releases": [{"label", "content", "format"}], "profile", "config"}` | The full report plus the resolved `config`, `profile` and the `rules` summary for the last release. |
+| `GET /api/trend/sample` | — | A valid 3-release example payload that `POST /api/trend` accepts. |
+| `GET /api/export/trend.csv` | repeated `release=label:content` (URL-encoded) + optional `profile` | `text/csv` with the header `label,entry_count,high,medium,low,total,publishable,sourced_ratio,vague_hits,banned_hits`, one row per release. |
+| `GET /api/export/trend.json` | same as `trend.csv` | The full trend report as JSON. |
+
+Both exports answer with a `Content-Disposition: attachment` header. The
+endpoints reuse the existing 2 MiB body cap, JSON-object validation, HTTP 400
+for bad input (including 0, 1 or 21 releases and an unknown profile), and HTTP
+422 for unparseable content.
+
+**Browser UI.** The *Trend* section accepts one release per block (a label line
+then the CSV/JSON content, blocks separated by a blank line), posts it to
+`POST /api/trend`, renders a table with one row per release, inline SVG
+sparklines for `total` and `sourced_ratio`, a verdict badge per delta and the
+download buttons (built in the browser from the returned payload). The feature
+ships in **v0.7.0** (Python package and Helm chart). No new third-party
+dependency is introduced; the standard library is still the only requirement.
+
 ## Deployment contract
 
 - Docker image builds for `linux/amd64` and `linux/arm64`, serves HTTP on port
@@ -359,6 +436,9 @@ The review workflow and audit trail landed in **v0.5.0** — see
 [Review workflow](#review-workflow).
 Named, reusable QA rule profiles and the effective-rule summary landed in
 **v0.6.0** — see [QA rule profiles](#qa-rule-profiles).
+Multi-release trend analysis with sparklines and trend export landed in
+**v0.7.0** — see
+[Multi-release trend analysis](#multi-release-trend-analysis).
 
 ## Success signals
 

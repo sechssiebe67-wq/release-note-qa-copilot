@@ -110,6 +110,11 @@
     .entry-block h3 { margin: .3rem 0; font-size: 1rem; }
     .entry-block code { color: var(--accent); }
     a { color: var(--accent); }
+    table.trend { width: 100%; border-collapse: collapse; font-size: .85rem; margin-top: .5rem; }
+    table.trend th, table.trend td { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid var(--border); }
+    table.trend th { color: var(--muted); font-weight: 500; }
+    .spark { display: block; }
+    .spark-label { font-size: .8rem; color: var(--muted); margin-bottom: .1rem; }
   </style>
 </head>
 <body>
@@ -243,6 +248,27 @@
       <div id="diff" class="muted">Run a diff to compare the current draft with the previous release.</div>
     </section>
 
+    <section style="grid-column: 1 / -1;" id="trendSection">
+      <label>Trend analysis</label>
+      <p class="muted">Enter 2–20 releases, oldest first. Each block is a label line followed by that release's CSV / JSON content; separate blocks with a blank line. Uses the selected QA rule profile and workspace rules above.</p>
+      <label for="trendContent">Releases</label>
+      <textarea id="trendContent" class="small" spellcheck="false" placeholder="2026.1&#10;id,type,title,description,benefit,source&#10;REL-1,feature,Bulk export,Export all reports,A much better experience,&#10;&#10;2026.2&#10;id,type,title,description,benefit,source&#10;REL-1,feature,Bulk export,Export all reports,One-click export saves time,REL-1"></textarea>
+      <div class="row" style="margin-top:.4rem">
+        <button id="analyzeTrend" type="button">Analyze trend</button>
+        <button id="loadTrendSample" class="secondary" type="button">Load trend sample</button>
+      </div>
+      <div class="status" id="trendStatus"></div>
+      <div id="trendResults" hidden>
+        <div class="summary" id="trendSummary"></div>
+        <div class="summary" id="trendSparklines"></div>
+        <div id="trendTable"></div>
+        <div class="row" style="margin-top:.6rem" id="trendExports">
+          <button id="downloadTrendCsv" class="secondary" type="button">Download trend CSV</button>
+          <button id="downloadTrendJson" class="secondary" type="button">Download trend JSON</button>
+        </div>
+      </div>
+    </section>
+
     <section style="grid-column: 1 / -1;" id="reviewHint" hidden>
       <label>Review</label>
       <p class="muted">Approve, reject or reset a draft and keep an audit trail. Set <code>DATA_DIR</code> when starting the server so drafts get an id and reviews are persisted durably.</p>
@@ -300,6 +326,7 @@
     let lastResult = null;
     let lastDraftId = null;
     let profilesByName = {};
+    let lastTrend = null;
 
     async function api(path, options) {
       const res = await fetch(path, options);
@@ -662,6 +689,143 @@
         JSON.stringify(lastResult.rules, null, 2), "application/json");
     }
 
+    function parseTrendInput(text) {
+      return String(text || "")
+        .split(/\n[ \t]*\n/)
+        .map(block => block.replace(/^\s+|\s+$/g, ""))
+        .filter(Boolean)
+        .map(block => {
+          const newline = block.indexOf("\n");
+          const label = newline === -1 ? block : block.slice(0, newline);
+          const content = newline === -1 ? "" : block.slice(newline + 1);
+          return { label: label.trim(), content: content.trim(), format: "auto" };
+        });
+    }
+
+    function trendVerdictClass(verdict) {
+      if (verdict === "improving") return "pass";
+      if (verdict === "regressing") return "high";
+      return "medium";
+    }
+
+    function sparkline(values, color) {
+      const width = 140, height = 30, pad = 3;
+      if (!values.length) return "";
+      const max = Math.max.apply(null, values);
+      const min = Math.min.apply(null, values);
+      const span = (max - min) || 1;
+      const step = values.length > 1 ? (width - 2 * pad) / (values.length - 1) : 0;
+      const points = values.map((value, index) => {
+        const x = pad + index * step;
+        const y = height - pad - ((value - min) / span) * (height - 2 * pad);
+        return x.toFixed(1) + "," + y.toFixed(1);
+      }).join(" ");
+      return '<svg class="spark" width="' + width + '" height="' + height +
+        '" viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="trend">' +
+        '<polyline fill="none" stroke="' + color + '" stroke-width="2" points="' + points + '"/></svg>';
+    }
+
+    function renderTrend(report) {
+      const releases = report.releases || [];
+      const deltas = report.deltas || [];
+      const overall = report.overall || {};
+      $("trendSummary").innerHTML =
+        '<span class="pill ' + trendVerdictClass(overall.verdict) + '">overall: ' + esc(overall.verdict) + '</span>' +
+        '<span class="pill pass">best: ' + esc(overall.best) + '</span>' +
+        '<span class="pill high">worst: ' + esc(overall.worst) + '</span>' +
+        '<span class="pill">' + esc(releases.length) + ' releases</span>';
+
+      const totals = releases.map(r => r.counts.total);
+      const ratios = releases.map(r => r.sourced_ratio);
+      $("trendSparklines").innerHTML =
+        '<div><div class="spark-label">Total flags (lower is better)</div>' + sparkline(totals, "#38bdf8") + '</div>' +
+        '<div><div class="spark-label">Sourced ratio (higher is better)</div>' + sparkline(ratios, "#34d399") + '</div>';
+
+      const header = "<tr><th>Release</th><th>Entries</th><th>High</th><th>Med</th><th>Low</th><th>Total</th><th>Publishable</th><th>Sourced</th><th>Vague</th><th>Banned</th></tr>";
+      const rows = releases.map(r =>
+        "<tr>" +
+          "<td>" + esc(r.label) + "</td>" +
+          "<td>" + esc(r.entry_count) + "</td>" +
+          "<td>" + esc(r.counts.high) + "</td>" +
+          "<td>" + esc(r.counts.medium) + "</td>" +
+          "<td>" + esc(r.counts.low) + "</td>" +
+          "<td>" + esc(r.counts.total) + "</td>" +
+          '<td><span class="pill ' + (r.publishable ? "pass" : "high") + '">' + (r.publishable ? "yes" : "no") + '</span></td>' +
+          "<td>" + esc(Math.round(r.sourced_ratio * 100) + "%") + "</td>" +
+          "<td>" + esc(r.vague_hits) + "</td>" +
+          "<td>" + esc(r.banned_hits) + "</td>" +
+        "</tr>"
+      ).join("");
+
+      const verdictBadges = deltas.map(d =>
+        '<span class="pill ' + trendVerdictClass(d.verdict) + '">' +
+        esc(d.from) + ' → ' + esc(d.to) + ': ' + esc(d.verdict) + '</span>'
+      ).join("");
+      $("trendTable").innerHTML =
+        '<table class="trend"><thead>' + header + '</thead><tbody>' + rows + '</tbody></table>' +
+        '<div class="summary" style="margin-top:.5rem">' + verdictBadges + '</div>';
+    }
+
+    async function loadTrendSample() {
+      try {
+        const data = await api("/api/trend/sample");
+        $("trendContent").value = (data.releases || []).map(r =>
+          r.label + "\n" + r.content
+        ).join("\n\n");
+        $("trendStatus").textContent = "Trend sample loaded.";
+      } catch (err) {
+        $("trendStatus").textContent = "Error: " + err.message;
+      }
+    }
+
+    async function analyzeTrend() {
+      const releases = parseTrendInput($("trendContent").value);
+      if (releases.length < 2) {
+        $("trendStatus").textContent = "Enter at least 2 release blocks separated by a blank line.";
+        return;
+      }
+      $("analyzeTrend").disabled = true;
+      $("trendStatus").textContent = "Analyzing trend…";
+      const body = { releases: releases };
+      const config = collectConfig();
+      if (Object.keys(config).length) body.config = config;
+      const profile = $("profile").value;
+      if (profile) body.profile = profile;
+      try {
+        const report = await api("/api/trend", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        lastTrend = report;
+        renderTrend(report);
+        $("trendResults").hidden = false;
+        $("trendStatus").textContent = "Trend analyzed.";
+      } catch (err) {
+        lastTrend = null;
+        $("trendResults").hidden = true;
+        $("trendStatus").textContent = "Error: " + err.message;
+      } finally {
+        $("analyzeTrend").disabled = false;
+      }
+    }
+
+    function downloadTrendCsv() {
+      if (!lastTrend) return;
+      const header = ["label", "entry_count", "high", "medium", "low", "total",
+        "publishable", "sourced_ratio", "vague_hits", "banned_hits"];
+      const rows = (lastTrend.releases || []).map(r =>
+        [r.label, r.entry_count, r.counts.high, r.counts.medium, r.counts.low,
+         r.counts.total, r.publishable, r.sourced_ratio, r.vague_hits, r.banned_hits]
+      );
+      saveBlob("release-trend.csv", buildCsv(header, rows), "text/csv");
+    }
+
+    function downloadTrendJson() {
+      if (!lastTrend) return;
+      saveBlob("release-trend.json", JSON.stringify(lastTrend, null, 2), "application/json");
+    }
+
     function download() {
       if (!lastMarkdown) { $("status").textContent = "Generate a draft first."; return; }
       const blob = new Blob([lastMarkdown], { type: "text/markdown" });
@@ -754,6 +918,10 @@
     $("downloadJson").addEventListener("click", downloadJson);
     $("downloadRulesCsv").addEventListener("click", downloadRulesCsv);
     $("downloadRulesJson").addEventListener("click", downloadRulesJson);
+    $("analyzeTrend").addEventListener("click", analyzeTrend);
+    $("loadTrendSample").addEventListener("click", loadTrendSample);
+    $("downloadTrendCsv").addEventListener("click", downloadTrendCsv);
+    $("downloadTrendJson").addEventListener("click", downloadTrendJson);
     $("profile").addEventListener("change", () => {
       const name = $("profile").value;
       if (!name) {

@@ -22,6 +22,18 @@ QA_FLAG_HEADER = ("entry_id", "code", "severity", "message")
 CHECKLIST_HEADER = ("label", "status", "detail")
 DIFF_HEADER = ("category", "id", "title", "type", "reason")
 RULES_HEADER = ("code", "severity", "count")
+TREND_HEADER = (
+    "label",
+    "entry_count",
+    "high",
+    "medium",
+    "low",
+    "total",
+    "publishable",
+    "sourced_ratio",
+    "vague_hits",
+    "banned_hits",
+)
 
 # Canonical order of the diff categories, matching the server payload.
 DIFF_CATEGORIES = (
@@ -141,6 +153,44 @@ def rules_json(payload: Mapping[str, Any]) -> str:
     )
 
 
+def trend_csv(report: Mapping[str, Any]) -> str:
+    """Return one CSV row per release: the documented trend header.
+
+    Header: ``label,entry_count,high,medium,low,total,publishable,
+    sourced_ratio,vague_hits,banned_hits``. A report without a ``releases``
+    list yields just the header row, so the shape is always stable.
+    """
+    rows = []
+    for item in _as_list(_as_mapping(report).get("releases")):
+        release = _as_mapping(item)
+        counts = _as_mapping(release.get("counts"))
+        rows.append(
+            (
+                release.get("label", ""),
+                release.get("entry_count", 0),
+                counts.get("high", 0),
+                counts.get("medium", 0),
+                counts.get("low", 0),
+                counts.get("total", 0),
+                release.get("publishable", False),
+                release.get("sourced_ratio", 0.0),
+                release.get("vague_hits", 0),
+                release.get("banned_hits", 0),
+            )
+        )
+    return _render_csv(TREND_HEADER, rows)
+
+
+def trend_json(report: Mapping[str, Any]) -> str:
+    """Serialise a trend report as stable, UTF-8 JSON without NaN values."""
+    return json.dumps(
+        report,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
 def draft_json(payload: Mapping[str, Any]) -> str:
     """Serialise the full payload as stable, UTF-8 JSON without NaN values."""
     return json.dumps(
@@ -156,11 +206,14 @@ __all__ = [
     "CHECKLIST_HEADER",
     "DIFF_HEADER",
     "RULES_HEADER",
+    "TREND_HEADER",
     "DIFF_CATEGORIES",
     "qa_flags_csv",
     "checklist_csv",
     "diff_csv",
     "rules_csv",
     "rules_json",
+    "trend_csv",
+    "trend_json",
     "draft_json",
 ]
