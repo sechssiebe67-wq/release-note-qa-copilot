@@ -49,7 +49,8 @@ The MVP is a dependency-free Python web application:
 | Draft comparison | Compare 2–10 complete draft payloads: per-draft QA metrics, a per-entry presence matrix (`identical` / `changed` / `unique`), a shared/unique breakdown and a deterministic publishability recommendation; export as CSV/JSON |
 | Profile comparison | QA-check one changelog under every built-in rule profile (plus an optional inline config layered on top): per-profile metrics, a delta against the baseline and a deterministic recommended profile; export as CSV/JSON |
 | Release readiness score | A single, explainable 0–100 score per draft with a `ready`/`review`/`risky` band and an optional gate policy (`min_score`, `max_high`) that yields a deterministic `pass`/`fail` ship decision; export as CSV/JSON |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles` |
+| Draft archive | Search and filter stored drafts (`q` on draft/entry titles, `tag`, `status`, `band`, `since`/`until`, `limit`/`offset`) and organise them with free-form tags kept in an append-only `archive.jsonl` log (latest action per draft/tag wins); per-draft tag audit trail and CSV/JSON export; requires `DATA_DIR` |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/archive/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/export/archive.csv`, `GET /api/export/archive.json`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/archive/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles`, `POST /api/archive/tag` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
@@ -75,7 +76,11 @@ comparison CSV* / *Download comparison JSON* / *Download matrix CSV*. A
 *Compare profiles* section takes a single changelog, lets the reviewer tick the
 profiles to compare (all built-ins by default) and renders a per-profile metrics
 table with the recommended profile highlighted plus *Download profile
-comparison CSV* / *Download profile comparison JSON*.
+comparison CSV* / *Download profile comparison JSON*. An *Archive* section
+searches stored drafts, filters them by tag, review status and score band, lists
+per-row *Open share page* and tag add/remove controls, and offers *Download
+archive CSV* / *Download archive JSON*; it is hidden with a `DATA_DIR` hint when
+history is disabled.
 
 ## Architecture
 
@@ -93,12 +98,13 @@ releasenote/
   compare.py    draft comparison matrix: metrics, presence, shared/unique, recommendation
   profile_compare.py  one changelog across rule profiles: metrics, delta, recommendation
   score.py      deterministic release readiness score, band and gate policy evaluation
+  archive.py    pure tag validation + archive listing filter/pagination
   generator.py  Markdown rendering with inline QA annotations and a template layout
-  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, score, template, trend, comparison, profile comparison and full payload
-  service.py    parse -> group -> qa -> score -> render pipeline (+ build_diff, build_trend, build_comparison, build_profile_comparison, reviews, shared drafts)
-  storage.py    optional append-only draft history + review/audit store
+  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, score, template, trend, comparison, profile comparison, archive and full payload
+  service.py    parse -> group -> qa -> score -> render pipeline (+ build_diff, build_trend, build_comparison, build_profile_comparison, build_archive, tag_draft, reviews, shared drafts)
+  storage.py    optional append-only draft history + review/audit store + archive tag log
   server.py     stdlib HTTP server + JSON API + read-only share pages
-  static/       single-page browser UI (draft, diff, review controls, share link)
+  static/       single-page browser UI (draft, diff, review controls, archive, share link)
 tests/          offline unit tests (no network)
 Dockerfile      non-root, read-only-friendly image
 deploy/helm/    one chart exposing image digest, ingress, probes, PVC
@@ -793,6 +799,91 @@ draft_id` using `navigator.clipboard.writeText` with a
 `document.execCommand('copy')` fallback, and shows a hint when `DATA_DIR` is
 unset. The feature ships in **v0.8.0** (Python package and Helm chart).
 
+## Draft archive
+
+**Goal.** The Copilot produces drafts, diffs, scores, reviews and share links,
+but there was no way to **find a past draft again** once it scrolled out of the
+flat history list, nor to organise drafts into a coherent set (for example
+"2.0 launch" or "security patch"). Reviewers asked to reference "the draft we
+approved for 2.0" had to scroll the history or keep the share URL by hand. The
+**draft archive** layers search, filters and free-form tags on top of the
+existing `DATA_DIR` history so a release team can retrieve and group past work
+without a database.
+
+**Intended users.** Release managers who track several parallel drafts, and
+reviewers/approvers who must find the exact draft that was signed off and show
+how it relates to the rest of a release set.
+
+**Relation to history, review and share.** The archive is a *view* over the
+same stored drafts the history and share links already use: titles, entry counts
+and `created_at` come from the history store, the `status` comes from the review
+store and the `band` is re-derived by re-running the current QA heuristics and
+score on the stored entries (so editing the rules keeps the archive consistent
+with share links). Tags are the only new data and live in their own append-only
+log.
+
+**The tag log.** `releasenote.storage.ArchiveStore` appends every tag
+transition to `<DATA_DIR>/archive.jsonl` as one JSON object per line carrying a
+monotonically increasing `seq`, the `draft_id`, the normalized `tag`, the
+`action` (`add`/`remove`) and an ISO-8601 `updated_at`. The current tag set is
+the **latest line per `(draft_id, tag)`**, so the log is append-only and the
+full tag history stays recoverable. A repeated `add` is idempotent: the tag is
+not duplicated, but one audit line is written per call. Without `DATA_DIR` the
+store falls back to memory and `is_durable` is `False`.
+
+**Validation.** `releasenote.archive.normalize_tag` trims and lower-cases a tag
+and `validate_tag` requires a non-empty slug of at most 40 characters matching
+`[a-z0-9][a-z0-9_-]*`. An invalid tag or an unknown `action` is rejected
+(HTTP 400) and appends nothing.
+
+**Listing and filtering.** `releasenote.archive.filter_drafts` is a pure,
+deterministic function that orders entries by `created_at` descending (ties
+broken by `draft_id` ascending) and supports:
+
+| Parameter | Match |
+| --- | --- |
+| `q` | Case-insensitive substring on the draft title and on any stored entry title. |
+| `tag` | Exact normalized tag. |
+| `status` | `pending` / `approved` / `rejected`. |
+| `band` | `ready` / `review` / `risky`. |
+| `since` / `until` | Inclusive ISO-8601 bounds on `created_at`. |
+| `limit` / `offset` | Page size (default 50, max 500) and non-negative offset. |
+
+The result is `{"drafts": [...], "total": N, "limit": L, "offset": O}` where
+each entry carries `draft_id`, `title`, `created_at`, `status`, `band`, `score`,
+`entry_count` and `tags`.
+
+**Endpoints.**
+
+| Endpoint | Body / query | Response |
+| --- | --- | --- |
+| `GET /api/archive` | `q`, `tag`, `status`, `band`, `since`, `until`, `limit`, `offset` | The filtered, paginated listing. |
+| `GET /api/archive/<draft_id>` | — | Metadata plus `tags` and the ordered `audit` list of tag transitions. |
+| `POST /api/archive/tag` | `{"draft_id", "tag", "action": "add"\|"remove"}` | The updated archive entry; appends exactly one line to `archive.jsonl`. |
+| `GET /api/archive/sample` | — | A small, valid example listing for the UI and tests. |
+| `GET /api/export/archive.csv` | same filters as `GET /api/archive` | `text/csv` with the header `draft_id,title,created_at,status,band,entry_count,tags` (tags joined by `|`). |
+| `GET /api/export/archive.json` | same filters as `GET /api/archive` | The full listing as stable UTF-8 JSON. |
+
+An unknown draft is HTTP 404 (and appends nothing), an invalid tag/action or
+filter is HTTP 400, and an oversized body is HTTP 413. The exports answer with
+a `Content-Disposition: attachment` header. When `DATA_DIR` is unset **every**
+archive endpoint returns HTTP 404 naming `DATA_DIR` (mirroring the share-link
+requirement) and the UI hides the *Archive* section behind a hint, so existing
+behaviour is unchanged.
+
+**Browser UI.** An *Archive* section provides a search box, tag/status/band
+filters, a results table with per-row *Open share page* and tag add/remove
+controls and *Download archive CSV* / *Download archive JSON* buttons built in
+the browser from the returned listing (so they need no extra round-trip). The
+feature ships in **v0.13.0** (Python package and Helm chart). No new
+third-party dependency is introduced; the standard library is still the only
+requirement.
+
+**Next direction.** A durable, searchable archive enables saved filter views,
+per-release-set dashboards, retention/archival policies and (with the approved
+review state as an anchor) a replayable release history that spans multiple
+years without a database.
+
 ## Deployment contract
 
 - Docker image builds for `linux/amd64` and `linux/arm64`, serves HTTP on port
@@ -826,6 +917,9 @@ unset. The feature ships in **v0.8.0** (Python package and Helm chart).
 - Server-side, per-workspace default gate policies and score trend across
   releases — the score and inline gate landed in **v0.12.0**; persistence is
   still open.
+- Saved archive filter views and per-release-set dashboards — the archive
+  search/filter and append-only tag log landed in **v0.13.0**; saved views are
+  still open.
 
 Per-workspace term and tone rules (was the first item in this list) landed in
 **v0.2.0** — see [Workspace configuration](#workspace-configuration).
@@ -854,6 +948,8 @@ deterministic recommended profile landed in **v0.11.0** — see
 The release readiness score with explainable penalties and an optional
 `min_score` / `max_high` ship-and-hold gate policy landed in **v0.12.0** — see
 [Release readiness score](#release-readiness-score).
+The draft archive with search, filters and an append-only tag log landed in
+**v0.13.0** — see [Draft archive](#draft-archive).
 
 ## Success signals
 

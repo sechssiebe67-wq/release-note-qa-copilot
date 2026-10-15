@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 
+from .archive import filter_drafts, validate_tag
 from .compare import compute_comparison
 from .config import WorkspaceConfig, sample_config
 from .diff import compute_diff
@@ -26,7 +27,7 @@ from .profiles import (
 )
 from .qa import analyze_entries, checklist
 from .score import compute_score
-from .storage import ReviewStore
+from .storage import ArchiveStore, DraftStore, ReviewStore
 from .templates import (
     ReleaseTemplate,
     default_template,
@@ -40,10 +41,11 @@ ConfigInput = Optional[Union[WorkspaceConfig, Dict[str, Any]]]
 
 
 class HistoryRequiredError(RuntimeError):
-    """Raised when a share link is requested but ``DATA_DIR`` is unset.
+    """Raised when a stored-draft feature needs ``DATA_DIR`` but it is unset.
 
-    Share links read a stored draft, so they are only available when the
-    file-backed history store is enabled. The server maps this to HTTP 400.
+    Share links and the draft archive read stored drafts, so they are only
+    available when the file-backed history store is enabled. The server maps
+    this to HTTP 400 for share links and HTTP 404 for archive endpoints.
     """
 
 
@@ -528,4 +530,212 @@ def get_shared_draft(
         "gate": score["gate"],
         "review": review,
         "created_at": record.get("created_at", ""),
+    }
+
+
+def _stored_entries(record: Dict[str, Any]) -> List[ChangeEntry]:
+    """Rebuild the stored entries of a draft record."""
+    return [
+        _entry_from_dict(item)
+        for item in (record.get("entries") or [])
+        if isinstance(item, dict)
+    ]
+
+
+def _stored_workspace(record: Dict[str, Any]) -> WorkspaceConfig:
+    """Return the workspace config that produced a stored draft."""
+    config_data = record.get("config")
+    if isinstance(config_data, dict):
+        return WorkspaceConfig.from_dict(config_data)
+    return WorkspaceConfig.default()
+
+
+def _stored_template(record: Dict[str, Any]) -> ReleaseTemplate:
+    """Return the template that produced a stored draft (or the default)."""
+    try:
+        return template_from_dict(record.get("template"))
+    except ValueError:
+        return default_template()
+
+
+def _archive_entry(
+    record: Dict[str, Any],
+    review_store: Optional[ReviewStore],
+    archive_store: Optional[ArchiveStore],
+) -> Dict[str, Any]:
+    """Build one archive listing entry from a stored draft record.
+
+    The stored entries are re-analysed with the current heuristics so the
+    ``band`` stays consistent with the rest of the product, and the current
+    review status and tags are merged in. ``entry_titles`` is included for the
+    free-text filter and stripped before the entry is returned to a caller.
+    """
+    draft_id = record.get("id")
+    entries = _stored_entries(record)
+    workspace = _stored_workspace(record)
+    template = _stored_template(record)
+    qa = analyze_entries(entries, workspace, template)
+    score = compute_score(qa, entries, workspace)
+    review = review_store.get(draft_id) if review_store is not None else None
+    status = review.status if review is not None else REVIEW_PENDING
+    tags = archive_store.tags_for(draft_id) if archive_store is not None else []
+    entry_count = record.get("entry_count")
+    if entry_count is None:
+        entry_count = len(entries)
+    return {
+        "draft_id": draft_id,
+        "title": record.get("title", ""),
+        "created_at": record.get("created_at", ""),
+        "status": status,
+        "band": score["band"],
+        "score": score["score"],
+        "entry_count": entry_count,
+        "tags": tags,
+        "entry_titles": [entry.title for entry in entries if entry.title],
+    }
+
+
+def build_archive(
+    query: Optional[str] = None,
+    tag: Optional[str] = None,
+    status: Optional[str] = None,
+    band: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    limit: Any = None,
+    offset: Any = None,
+    draft_store: Optional[DraftStore] = None,
+    review_store: Optional[ReviewStore] = None,
+    archive_store: Optional[ArchiveStore] = None,
+) -> Dict[str, Any]:
+    """Return the filtered, paginated draft archive listing.
+
+    Every stored draft is enriched with its current review ``status``, score
+    ``band``, ``entry_count`` and ``tags`` and then passed through
+    :func:`releasenote.archive.filter_drafts`, which applies ``query``, ``tag``,
+    ``status``, ``band`` and the ``since``/``until`` window and paginates with
+    ``limit``/``offset``.
+
+    Raises :class:`HistoryRequiredError` when ``DATA_DIR`` is unset (no
+    ``draft_store``), so the server can map it to HTTP 404, and
+    :class:`ValueError` for an invalid tag or filter value.
+    """
+    if draft_store is None:
+        raise HistoryRequiredError(
+            "draft archive requires history; set DATA_DIR to enable it"
+        )
+    records = draft_store.list_all()
+    entries = [
+        _archive_entry(record, review_store, archive_store)
+        for record in records
+        if isinstance(record, dict)
+    ]
+    report = filter_drafts(
+        entries,
+        query=query,
+        tag=tag,
+        status=status,
+        band=band,
+        since=since,
+        until=until,
+        limit=limit,
+        offset=offset,
+    )
+    report["durable"] = True
+    return report
+
+
+def get_archive_entry(
+    draft_id: str,
+    draft_store: Optional[DraftStore] = None,
+    review_store: Optional[ReviewStore] = None,
+    archive_store: Optional[ArchiveStore] = None,
+) -> Dict[str, Any]:
+    """Return one archive entry: metadata plus its tags and tag audit trail.
+
+    Raises :class:`HistoryRequiredError` when ``DATA_DIR`` is unset and
+    :class:`LookupError` for an unknown draft id.
+    """
+    if draft_store is None:
+        raise HistoryRequiredError(
+            "draft archive requires history; set DATA_DIR to enable it"
+        )
+    record = draft_store.get(draft_id)
+    if record is None:
+        raise LookupError("unknown draft id: {}".format(draft_id))
+    entry = _archive_entry(record, review_store, archive_store)
+    entry.pop("entry_titles", None)
+    entry["audit"] = (
+        archive_store.audit(draft_id) if archive_store is not None else []
+    )
+    return entry
+
+
+def tag_draft(
+    draft_id: str,
+    tag: str,
+    action: str,
+    draft_store: Optional[DraftStore] = None,
+    review_store: Optional[ReviewStore] = None,
+    archive_store: Optional[ArchiveStore] = None,
+) -> Dict[str, Any]:
+    """Add or remove a tag on a stored draft and return its archive entry.
+
+    ``action`` must be ``add`` or ``remove`` and ``tag`` must be valid. The
+    transition is appended to the append-only ``archive.jsonl`` log. Raises
+    :class:`HistoryRequiredError` when ``DATA_DIR`` is unset,
+    :class:`LookupError` for an unknown draft id and :class:`ValueError` for an
+    invalid tag or action; a failed call appends nothing.
+    """
+    if draft_store is None:
+        raise HistoryRequiredError(
+            "draft archive requires history; set DATA_DIR to enable it"
+        )
+    if not isinstance(draft_id, str) or not draft_id.strip():
+        raise ValueError("draft_id is required")
+    record = draft_store.get(draft_id)
+    if record is None:
+        raise LookupError("unknown draft id: {}".format(draft_id))
+    action_norm = (action or "").strip().lower() if isinstance(action, str) else ""
+    if action_norm not in ("add", "remove"):
+        raise ValueError("unknown tag action: {!r}".format(action))
+    validate_tag(tag)
+    store = archive_store if archive_store is not None else ArchiveStore()
+    store.tag(draft_id, tag, action_norm)
+    return get_archive_entry(draft_id, draft_store, review_store, store)
+
+
+def sample_archive() -> Dict[str, Any]:
+    """Return a small, valid archive listing for the UI and tests.
+
+    Two drafts are described so the UI can render the table and both exports
+    without a round-trip to a real store.
+    """
+    return {
+        "durable": True,
+        "total": 2,
+        "limit": 50,
+        "offset": 0,
+        "drafts": [
+            {
+                "draft_id": "sample-0002",
+                "title": "2.0 launch",
+                "created_at": "2026-01-02T10:00:00+00:00",
+                "status": "approved",
+                "band": "ready",
+                "score": 96,
+                "entry_count": 3,
+                "tags": ["launch", "v2"],
+            },
+            {
+                "draft_id": "sample-0001",
+                "title": "Security patch",
+                "created_at": "2026-01-01T09:00:00+00:00",
+                "status": "pending",
+                "band": "review",
+                "score": 72,
+                "entry_count": 2,
+                "tags": ["security"],
+            },
+        ],
     }

@@ -17,6 +17,8 @@ from urllib.parse import parse_qs, urlparse
 from . import __version__
 from .config import WorkspaceConfig
 from .exporters import (
+    archive_csv,
+    archive_json,
     checklist_csv,
     comparison_csv,
     comparison_json,
@@ -50,21 +52,25 @@ from .templates import (
 )
 from .service import (
     HistoryRequiredError,
+    build_archive,
     build_comparison,
     build_diff,
     build_draft,
     build_profile_comparison,
     build_trend,
+    get_archive_entry,
     get_review,
     get_shared_draft,
     record_review,
     sample,
+    sample_archive,
     sample_comparison,
     sample_profile_comparison,
     sample_trend,
     sample_workspace_config,
+    tag_draft,
 )
-from .storage import DraftStore, ReviewStore
+from .storage import ArchiveStore, DraftStore, ReviewStore
 
 MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MiB upload cap.
 MAX_DRAIN_BYTES = 8 * 1024 * 1024  # Bounded read of an over-limit body.
@@ -129,6 +135,14 @@ _PROFILE_EXPORTS = {
     "/api/export/profile-comparison.json": (
         "application/json; charset=utf-8",
         "profile-comparison.json",
+    ),
+}
+# Archive exports reuse the filter query parameters of ``GET /api/archive``.
+_ARCHIVE_EXPORTS = {
+    "/api/export/archive.csv": ("text/csv", "draft-archive.csv"),
+    "/api/export/archive.json": (
+        "application/json; charset=utf-8",
+        "draft-archive.json",
     ),
 }
 _FORMATS = ("auto", "csv", "json")
@@ -363,6 +377,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/compare-profiles/sample":
             self._send_json(200, sample_profile_comparison())
             return
+        if path == "/api/archive/sample":
+            self._send_json(200, sample_archive())
+            return
+        if path == "/api/archive":
+            self._handle_archive(parsed)
+            return
+        if path.startswith("/api/archive/"):
+            self._handle_archive_entry(path)
+            return
         if path == "/api/history":
             store = getattr(self.server, "store", None)
             query = parse_qs(parsed.query)
@@ -396,6 +419,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._shared_draft(draft_id, json_errors=True)
             if payload is not None:
                 self._send_json(200, payload)
+            return
+        if path in _ARCHIVE_EXPORTS:
+            self._handle_archive_export(path, parsed)
             return
         if path in _PROFILE_EXPORTS:
             self._handle_profile_export(path, parsed)
@@ -509,6 +535,102 @@ class Handler(BaseHTTPRequestHandler):
         else:
             body = comparison_json(report)
         content_type, filename = _COMPARE_EXPORTS[path]
+        self._send(
+            200,
+            body.encode("utf-8"),
+            content_type,
+            {"Content-Disposition": 'attachment; filename="{}"'.format(filename)},
+        )
+
+    def _archive_store(self) -> Optional[ArchiveStore]:
+        return getattr(self.server, "archive_store", None)
+
+    def _handle_archive(self, parsed: Any) -> None:
+        """Serve the filtered, paginated draft archive listing.
+
+        Accepts ``q``, ``tag``, ``status``, ``band``, ``since``, ``until``,
+        ``limit`` and ``offset`` query parameters. All of them are optional; an
+        invalid value returns HTTP 400 and an unset history store returns HTTP
+        404 naming ``DATA_DIR``.
+        """
+        query = parse_qs(parsed.query)
+        store = getattr(self.server, "store", None)
+        review_store = getattr(self.server, "review_store", None)
+        try:
+            report = build_archive(
+                query=_first(query, "q"),
+                tag=_first(query, "tag"),
+                status=_first(query, "status"),
+                band=_first(query, "band"),
+                since=_first(query, "since"),
+                until=_first(query, "until"),
+                limit=_first(query, "limit"),
+                offset=_first(query, "offset"),
+                draft_store=store,
+                review_store=review_store,
+                archive_store=self._archive_store(),
+            )
+        except HistoryRequiredError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        self._send_json(200, report)
+
+    def _handle_archive_entry(self, path: str) -> None:
+        """Serve one archive entry (metadata plus tags and the tag audit)."""
+        draft_id = path[len("/api/archive/"):]
+        store = getattr(self.server, "store", None)
+        review_store = getattr(self.server, "review_store", None)
+        try:
+            entry = get_archive_entry(
+                draft_id,
+                store,
+                review_store,
+                self._archive_store(),
+            )
+        except HistoryRequiredError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        except LookupError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        self._send_json(200, entry)
+
+    def _handle_archive_export(self, path: str, parsed: Any) -> None:
+        """Serve the archive CSV/JSON export using the archive filter query.
+
+        The exports accept the same ``q``/``tag``/``status``/``band``/
+        ``since``/``until``/``limit``/``offset`` query parameters as
+        ``GET /api/archive`` and answer with a ``Content-Disposition:
+        attachment`` header.
+        """
+        query = parse_qs(parsed.query)
+        store = getattr(self.server, "store", None)
+        review_store = getattr(self.server, "review_store", None)
+        try:
+            report = build_archive(
+                query=_first(query, "q"),
+                tag=_first(query, "tag"),
+                status=_first(query, "status"),
+                band=_first(query, "band"),
+                since=_first(query, "since"),
+                until=_first(query, "until"),
+                limit=_first(query, "limit"),
+                offset=_first(query, "offset"),
+                draft_store=store,
+                review_store=review_store,
+                archive_store=self._archive_store(),
+            )
+        except HistoryRequiredError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        body = archive_csv(report) if path.endswith(".csv") else archive_json(report)
+        content_type, filename = _ARCHIVE_EXPORTS[path]
         self._send(
             200,
             body.encode("utf-8"),
@@ -820,11 +942,15 @@ class Handler(BaseHTTPRequestHandler):
             "/api/trend",
             "/api/compare",
             "/api/compare-profiles",
+            "/api/archive/tag",
         ):
             self._send_json(404, {"error": "not found", "path": parsed.path})
             return
         payload = self._parse_body()
         if payload is None:
+            return
+        if path == "/api/archive/tag":
+            self._post_archive_tag(payload)
             return
         if path == "/api/review":
             self._post_review(payload)
@@ -846,6 +972,47 @@ class Handler(BaseHTTPRequestHandler):
             self._post_generate(payload, workspace, profile_name, template)
         else:
             self._post_diff(payload, workspace, profile_name, template)
+
+    def _post_archive_tag(self, payload: Dict[str, Any]) -> None:
+        """Add or remove a tag on a stored draft.
+
+        An unknown draft returns HTTP 404, an invalid tag or action returns
+        HTTP 400 and an unset history store returns HTTP 404 naming
+        ``DATA_DIR``; none of those append to the tag log.
+        """
+        draft_id = payload.get("draft_id")
+        if not isinstance(draft_id, str) or not draft_id.strip():
+            self._send_json(400, {"error": "field 'draft_id' is required"})
+            return
+        tag = payload.get("tag")
+        if not isinstance(tag, str):
+            self._send_json(400, {"error": "field 'tag' is required"})
+            return
+        action = payload.get("action")
+        if not isinstance(action, str) or not action.strip():
+            self._send_json(400, {"error": "field 'action' is required"})
+            return
+        store = getattr(self.server, "store", None)
+        review_store = getattr(self.server, "review_store", None)
+        try:
+            entry = tag_draft(
+                draft_id,
+                tag,
+                action,
+                store,
+                review_store,
+                self._archive_store(),
+            )
+        except HistoryRequiredError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except LookupError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        self._send_json(200, entry)
 
     def _post_review(self, payload: Dict[str, Any]) -> None:
         draft_id = payload.get("draft_id")
@@ -995,6 +1162,7 @@ def create_server(
     data_dir = os.environ.get("DATA_DIR")
     server.store = DraftStore(data_dir) if data_dir else None
     server.review_store = ReviewStore(data_dir, server.store)
+    server.archive_store = ArchiveStore(data_dir)
     return server, server.server_address[0], server.server_address[1]
 
 

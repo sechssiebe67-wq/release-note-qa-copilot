@@ -32,6 +32,9 @@ unsupported claims are flagged before publishing.
   checklist and diff as CSV / JSON for spreadsheets and tooling.
 - Hand a draft to a colleague with a read-only share link (`/s/<draft_id>`)
   instead of copy-pasting Markdown or re-uploading the source.
+- Find a past draft again with a searchable **archive**: filter by title/entry
+  title, tag, review status, score band and date, and organise drafts into sets
+  with free-form tags kept in an append-only tag log.
 
 See [CONCEPT.md](CONCEPT.md) for the product goal, users and roadmap.
 
@@ -50,7 +53,7 @@ Configuration:
 | --- | --- | --- |
 | `HOST` | `0.0.0.0` | Listen address |
 | `PORT` | `8080` | Listen port |
-| `DATA_DIR` | unset | Enable draft history and durable review/audit logs below this directory |
+| `DATA_DIR` | unset | Enable draft history plus durable review/audit and archive tag logs below this directory |
 
 ## HTTP API
 
@@ -81,15 +84,21 @@ Configuration:
 | GET | `/api/export/profile-comparison.json` | Full profile comparison report as JSON |
 | GET | `/api/export/score.csv` | Release readiness score penalties as CSV (`code,severity,count,points`) |
 | GET | `/api/export/score.json` | Full `score` object as JSON |
+| GET | `/api/export/archive.csv` | Draft archive listing as CSV (`draft_id,title,created_at,status,band,entry_count,tags`) |
+| GET | `/api/export/archive.json` | Full draft archive listing as JSON |
 | GET | `/api/export/draft.json` | Full draft payload as JSON |
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
 | GET | `/api/review/<draft_id>` | Current review status plus the audit trail |
+| GET | `/api/archive` | Search/filter/paginate the stored draft archive (needs `DATA_DIR`) |
+| GET | `/api/archive/<draft_id>` | One archived draft’s metadata, tags and tag audit trail |
+| GET | `/api/archive/sample` | Example archive listing for the UI and tests |
 | GET | `/api/share/<draft_id>` | Read-only JSON view of a stored draft (needs `DATA_DIR`) |
 | GET | `/s/<draft_id>` | Read-only HTML share page for a stored draft (needs `DATA_DIR`) |
 | POST | `/api/generate` | Build a draft |
 | POST | `/api/diff` | Compare a previous and a current draft |
 | POST | `/api/review` | Record an approve / reject / reset transition |
+| POST | `/api/archive/tag` | Add or remove a tag on a stored draft |
 | POST | `/api/trend` | Analyse an ordered list of 2–20 releases |
 | POST | `/api/compare` | Compare 2–10 candidate drafts |
 | POST | `/api/compare-profiles` | Compare one changelog across QA rule profiles |
@@ -443,6 +452,77 @@ is required. An unknown id returns HTTP 404. Both views are **unauthenticated**
 (anyone with the URL can read the draft) and **read-only** (there are no
 approve / reject controls on the HTML page). Neither call writes to disk. The
 feature was added in **v0.8.0** and needs no third-party dependency.
+
+## Draft archive
+
+The history list is flat, so a past draft becomes hard to find once it scrolls
+away, and there is no way to group drafts into a coherent set. When `DATA_DIR`
+is set, the **draft archive** adds search, filters and free-form tags on top of
+the same stored drafts the history and share links use:
+
+```sh
+# List the most recent drafts.
+curl 'http://127.0.0.1:8080/api/archive'
+
+# Search by title or entry title, filter by tag/status/band/date and paginate.
+curl -G 'http://127.0.0.1:8080/api/archive' \
+  --data-urlencode 'q=export' \
+  --data-urlencode 'tag=launch' \
+  --data-urlencode 'status=approved' \
+  --data-urlencode 'band=ready' \
+  --data-urlencode 'since=2026-01-01T00:00:00+00:00' \
+  --data-urlencode 'limit=50' \
+  --data-urlencode 'offset=0'
+
+# Tag a stored draft (append to the tag log).
+curl -X POST 'http://127.0.0.1:8080/api/archive/tag' \
+  -H 'Content-Type: application/json' \
+  -d '{"draft_id": "DRAFT_ID", "tag": "launch", "action": "add"}'
+
+# Inspect one draft’s tags and their audit trail.
+curl 'http://127.0.0.1:8080/api/archive/DRAFT_ID'
+
+# Download the (filtered) listing.
+curl -G 'http://127.0.0.1:8080/api/export/archive.csv' --data-urlencode 'tag=launch'
+curl -G 'http://127.0.0.1:8080/api/export/archive.json' --data-urlencode 'q=export'
+curl 'http://127.0.0.1:8080/api/archive/sample'
+```
+
+Each listing entry carries `draft_id`, `title`, `created_at`, `status`, `band`,
+`score`, `entry_count` and `tags`. The listing is ordered by `created_at`
+descending (ties broken by `draft_id` ascending) and filters case-insensitively
+on `q` (draft title and any stored entry title), exactly on `tag`, `status`
+(`pending`/`approved`/`rejected`) and `band` (`ready`/`review`/`risky`) and
+inclusively on `since`/`until` (ISO-8601); `limit` defaults to 50 (max 500) and
+`offset` paginates without dropping or duplicating rows.
+
+Tags are validated as non-empty, lower-cased slugs of at most 40 characters
+matching `[a-z0-9][a-z0-9_-]*`. Every `POST /api/archive/tag` appends exactly
+one line to `<DATA_DIR>/archive.jsonl` with a monotonically increasing `seq`,
+the `draft_id`, the `tag`, the `action` (`add`/`remove`) and an ISO-8601
+`updated_at`. The current tag set is the latest line per `(draft_id, tag)`, so
+the log is append-only and the tag history is recoverable; a repeated `add` is
+idempotent. `GET /api/archive/<draft_id>` returns the metadata plus `tags` and
+the ordered `audit` list.
+
+| Endpoint | Shape |
+| --- | --- |
+| `GET /api/export/archive.csv` | `draft_id,title,created_at,status,band,entry_count,tags` — one row per listed draft, tags joined by `|`, `\n` line endings and RFC-4180 quoting. |
+| `GET /api/export/archive.json` | The full listing as stable UTF-8 JSON (sorted keys, no `NaN`). |
+
+An unknown `draft_id` returns HTTP 404 and appends nothing; an invalid tag or
+`action` returns HTTP 400 and appends nothing; a body over 2 MiB returns HTTP
+413. Both exports accept the same filter query parameters as `GET /api/archive`
+and answer with a `Content-Disposition: attachment` header.
+
+Like share links, the archive **requires `DATA_DIR`**: without a stored draft
+there is nothing to search, and every archive endpoint returns HTTP 404 naming
+`DATA_DIR`. The browser UI hides an *Archive* section behind a hint in that
+case; with history enabled it shows a search box, tag/status/band filters, a
+results table with per-row *Open share page* and tag add/remove controls, and
+*Download archive CSV* / *Download archive JSON* buttons built in the browser
+from the returned listing. The feature was added in **v0.13.0** and needs no
+third-party dependency.
 
 ## Trend analysis
 

@@ -80,10 +80,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["format"], "json")
 
-    def test_version_is_0_12_0(self):
+    def test_version_is_0_13_0(self):
         status, body = self._get("/api/version")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["version"], "0.12.0")
+        self.assertEqual(json.loads(body)["version"], "0.13.0")
 
     def test_config_sample_endpoint(self):
         status, body = self._get("/api/config/sample")
@@ -1215,6 +1215,268 @@ class ServerShareNoHistoryTests(_ReviewServerMixin, unittest.TestCase):
         payload = json.loads(body.decode("utf-8"))
         self.assertIn("error", payload)
         self.assertIn("DATA_DIR", payload["error"])
+
+
+class ServerArchiveTests(_ReviewServerMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.env = mock.patch.dict(os.environ, {"DATA_DIR": cls.tmp.name})
+        cls.env.start()
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+        cls.env.stop()
+        cls.tmp.cleanup()
+
+    def _get_json(self, path):
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=5) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def _get_raw(self, path):
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=5) as resp:
+                return resp.status, resp.headers, resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers, exc.read()
+
+    def _tag(self, payload):
+        request = urllib.request.Request(
+            self.base + "/api/archive/tag",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def _log_lines(self):
+        path = os.path.join(self.tmp.name, "archive.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as handle:
+            return [line for line in handle if line.strip()]
+
+    def _entry_for(self, draft_id):
+        _status, listing = self._get_json("/api/archive")
+        for entry in listing["drafts"]:
+            if entry["draft_id"] == draft_id:
+                return entry
+        return None
+
+    def test_archive_listing_has_expected_fields_and_order(self):
+        ids = []
+        for _ in range(3):
+            ids.append(self._generate()["draft_id"])
+        status, listing = self._get_json("/api/archive")
+        self.assertEqual(status, 200)
+        for draft_id in ids:
+            entry = next(d for d in listing["drafts"] if d["draft_id"] == draft_id)
+            for key in (
+                "draft_id",
+                "title",
+                "created_at",
+                "status",
+                "band",
+                "entry_count",
+                "tags",
+            ):
+                self.assertIn(key, entry)
+        times = [d["created_at"] for d in listing["drafts"]]
+        self.assertEqual(times, sorted(times, reverse=True))
+
+    def test_archive_query_filters(self):
+        result = self._generate()
+        status, listing = self._get_json("/api/archive?q=" + result["title"][:3])
+        self.assertEqual(status, 200)
+        self.assertTrue(any(d["draft_id"] == result["draft_id"] for d in listing["drafts"]))
+
+    def test_tag_add_is_idempotent_and_logs_each_call(self):
+        result = self._generate()
+        draft_id = result["draft_id"]
+        before = len(self._log_lines())
+        status, entry = self._tag(
+            {"draft_id": draft_id, "tag": "Launch", "action": "add"}
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("launch", entry["tags"])
+        self.assertEqual(len(self._log_lines()), before + 1)
+        status, again = self._tag(
+            {"draft_id": draft_id, "tag": "launch", "action": "add"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(again["tags"], ["launch"])
+        self.assertEqual(len(self._log_lines()), before + 2)
+        seqs = [entry["seq"] for entry in again["audit"]]
+        self.assertEqual(seqs, sorted(seqs))
+        self.assertEqual(len(set(seqs)), len(seqs))
+
+    def test_tag_remove(self):
+        result = self._generate()
+        draft_id = result["draft_id"]
+        self._tag({"draft_id": draft_id, "tag": "launch", "action": "add"})
+        status, entry = self._tag(
+            {"draft_id": draft_id, "tag": "launch", "action": "remove"}
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn("launch", entry["tags"])
+
+    def test_archive_entry_includes_audit(self):
+        result = self._generate()
+        draft_id = result["draft_id"]
+        self._tag({"draft_id": draft_id, "tag": "launch", "action": "add"})
+        status, entry = self._get_json("/api/archive/" + draft_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(entry["draft_id"], draft_id)
+        self.assertIn("launch", entry["tags"])
+        self.assertEqual(len(entry["audit"]), 1)
+
+    def test_archive_entry_unknown_is_404(self):
+        status, body = self._get_json("/api/archive/does-not-exist")
+        self.assertEqual(status, 404)
+        self.assertIn("error", body)
+
+    def test_tag_unknown_draft_is_404_and_appends_nothing(self):
+        before = len(self._log_lines())
+        status, body = self._tag(
+            {"draft_id": "missing", "tag": "launch", "action": "add"}
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("error", body)
+        self.assertEqual(len(self._log_lines()), before)
+
+    def test_tag_invalid_tag_is_400_and_appends_nothing(self):
+        result = self._generate()
+        before = len(self._log_lines())
+        status, _body = self._tag(
+            {"draft_id": result["draft_id"], "tag": "bad tag", "action": "add"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(len(self._log_lines()), before)
+
+    def test_tag_invalid_action_is_400_and_appends_nothing(self):
+        result = self._generate()
+        before = len(self._log_lines())
+        status, _body = self._tag(
+            {"draft_id": result["draft_id"], "tag": "launch", "action": "flip"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(len(self._log_lines()), before)
+
+    def test_tag_oversized_body_is_413(self):
+        huge = "x" * (2 * 1024 * 1024 + 10)
+        request = urllib.request.Request(
+            self.base + "/api/archive/tag",
+            data=json.dumps(
+                {"draft_id": "d", "tag": "launch", "action": huge}
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=10)
+        self.assertEqual(ctx.exception.code, 413)
+
+    def test_export_archive_csv(self):
+        result = self._generate()
+        self._tag({"draft_id": result["draft_id"], "tag": "launch", "action": "add"})
+        status, headers, body = self._get_raw("/api/export/archive.csv")
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/csv"))
+        self.assertIn("attachment", headers["Content-Disposition"])
+        rows = list(csv.reader(io.StringIO(body.decode("utf-8"))))
+        self.assertEqual(
+            rows[0],
+            ["draft_id", "title", "created_at", "status", "band", "entry_count", "tags"],
+        )
+        found = [row for row in rows[1:] if row[0] == result["draft_id"]]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0][6], "launch")
+
+    def test_export_archive_json(self):
+        result = self._generate()
+        status, headers, body = self._get_raw("/api/export/archive.json")
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("application/json"))
+        self.assertIn("attachment", headers["Content-Disposition"])
+        exported = json.loads(body.decode("utf-8"))
+        self.assertTrue(
+            any(d["draft_id"] == result["draft_id"] for d in exported["drafts"])
+        )
+
+    def test_archive_sample(self):
+        status, body = self._get_json("/api/archive/sample")
+        self.assertEqual(status, 200)
+        self.assertIn("drafts", body)
+        self.assertTrue(body["drafts"])
+        for entry in body["drafts"]:
+            for key in ("draft_id", "title", "created_at", "status", "band", "tags"):
+                self.assertIn(key, entry)
+
+
+class ServerArchiveNoHistoryTests(_ReviewServerMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.env = mock.patch.dict(os.environ, {})
+        cls.env.start()
+        os.environ.pop("DATA_DIR", None)
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+        cls.env.stop()
+
+    def _get_status(self, path):
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=5) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read()
+
+    def test_archive_listing_without_history_is_404(self):
+        status, body = self._get_status("/api/archive")
+        self.assertEqual(status, 404)
+        self.assertIn("DATA_DIR", json.loads(body.decode("utf-8"))["error"])
+
+    def test_archive_entry_without_history_is_404(self):
+        status, body = self._get_status("/api/archive/anything")
+        self.assertEqual(status, 404)
+        self.assertIn("DATA_DIR", json.loads(body.decode("utf-8"))["error"])
+
+    def test_archive_export_without_history_is_404(self):
+        status, body = self._get_status("/api/export/archive.csv")
+        self.assertEqual(status, 404)
+        self.assertIn("DATA_DIR", json.loads(body.decode("utf-8"))["error"])
+
+    def test_tag_without_history_is_404(self):
+        request = urllib.request.Request(
+            self.base + "/api/archive/tag",
+            data=json.dumps(
+                {"draft_id": "d", "tag": "launch", "action": "add"}
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as resp:
+                status, body = resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            status, body = exc.code, exc.read()
+        self.assertEqual(status, 404)
+        self.assertIn("DATA_DIR", json.loads(body.decode("utf-8"))["error"])
+
+    def test_archive_sample_needs_no_history(self):
+        status, _body = self._get_status("/api/archive/sample")
+        self.assertEqual(status, 200)
 
 
 if __name__ == "__main__":

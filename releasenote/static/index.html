@@ -376,6 +376,45 @@
       <label>Recent drafts</label>
       <div id="history" class="muted">No stored drafts.</div>
     </section>
+
+    <section style="grid-column: 1 / -1;" id="archiveHint" hidden>
+      <label>Archive</label>
+      <p class="muted">Search past drafts and organise them with tags. Set <code>DATA_DIR</code> when starting the server so drafts are persisted and can be archived.</p>
+    </section>
+
+    <section style="grid-column: 1 / -1;" id="archiveSection" hidden>
+      <label>Archive</label>
+      <p class="muted">Find a past draft by title or entry title, filter by tag, review status and score band, and tag drafts to group a release set (for example <code>2.0</code> or <code>security</code>).</p>
+      <div class="row">
+        <div><label for="archiveQuery">Search</label><input id="archiveQuery" placeholder="title or entry title" /></div>
+        <div><label for="archiveTag">Tag</label><input id="archiveTag" placeholder="e.g. launch" /></div>
+        <div>
+          <label for="archiveStatus">Status</label>
+          <select id="archiveStatus">
+            <option value="">(any)</option>
+            <option value="pending">pending</option>
+            <option value="approved">approved</option>
+            <option value="rejected">rejected</option>
+          </select>
+        </div>
+        <div>
+          <label for="archiveBand">Band</label>
+          <select id="archiveBand">
+            <option value="">(any)</option>
+            <option value="ready">ready</option>
+            <option value="review">review</option>
+            <option value="risky">risky</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:.4rem">
+        <button id="searchArchive" type="button">Search archive</button>
+        <button id="downloadArchiveCsv" class="secondary" type="button">Download archive CSV</button>
+        <button id="downloadArchiveJson" class="secondary" type="button">Download archive JSON</button>
+      </div>
+      <div class="status" id="archiveStatusMessage"></div>
+      <div id="archiveResults" class="muted">No archived drafts.</div>
+    </section>
   </main>
 
   <script>
@@ -390,6 +429,7 @@
     let lastTrend = null;
     let lastComparison = null;
     let lastProfileComparison = null;
+    let lastArchive = null;
 
     async function api(path, options) {
       const res = await fetch(path, options);
@@ -1416,6 +1456,131 @@
       }
     }
 
+    function archiveFilters() {
+      const params = new URLSearchParams();
+      const q = $("archiveQuery").value.trim();
+      if (q) params.set("q", q);
+      const tag = $("archiveTag").value.trim();
+      if (tag) params.set("tag", tag);
+      const status = $("archiveStatus").value;
+      if (status) params.set("status", status);
+      const band = $("archiveBand").value;
+      if (band) params.set("band", band);
+      return params;
+    }
+
+    function archiveBusy(on) {
+      $("searchArchive").disabled = on;
+      $("downloadArchiveCsv").disabled = on;
+      $("downloadArchiveJson").disabled = on;
+    }
+
+    function renderArchive(report) {
+      const drafts = report.drafts || [];
+      const total = report.total != null ? report.total : drafts.length;
+      $("archiveStatusMessage").textContent = total + " draft(s) in archive.";
+      if (!drafts.length) {
+        $("archiveResults").textContent = "No archived drafts match.";
+        return;
+      }
+      const body = drafts.map(d => {
+        const tags = (d.tags || []).length
+          ? d.tags.map(t => '<span class="pill">' + esc(t) + '</span>').join(" ")
+          : '<span class="muted">none</span>';
+        const when = d.created_at ? new Date(d.created_at).toLocaleString() : "";
+        return '<tr>' +
+          '<td>' + esc(d.title || "(untitled)") +
+            '<div class="muted"><code>' + esc(d.draft_id) + '</code></div></td>' +
+          '<td>' + esc(when) + '</td>' +
+          '<td><span class="pill ' + esc(d.status) + '">' + esc(d.status) + '</span></td>' +
+          '<td><span class="pill ' + bandClass(d.band) + '">' + esc(d.band) + '</span></td>' +
+          '<td>' + esc(d.entry_count) + '</td>' +
+          '<td>' + tags + '</td>' +
+          '<td><a href="/s/' + encodeURIComponent(d.draft_id) + '" target="_blank" rel="noopener">Open share page</a></td>' +
+          '<td><div class="row" style="gap:.3rem">' +
+            '<input data-archive-tag-input="' + esc(d.draft_id) + '" placeholder="tag" style="min-width:90px" />' +
+            '<button class="secondary" type="button" data-archive-tag-add="' + esc(d.draft_id) + '">Add</button>' +
+            '<button class="secondary" type="button" data-archive-tag-remove="' + esc(d.draft_id) + '">Remove</button>' +
+          '</div></td>' +
+        '</tr>';
+      }).join("");
+      $("archiveResults").innerHTML =
+        '<table class="trend"><thead><tr>' +
+        '<th>Title</th><th>Created</th><th>Status</th><th>Band</th>' +
+        '<th>Entries</th><th>Tags</th><th>Share</th><th>Tag</th>' +
+        '</tr></thead><tbody>' + body + '</tbody></table>';
+      $("archiveResults").querySelectorAll("[data-archive-tag-add]").forEach(btn => {
+        btn.addEventListener("click", () =>
+          tagArchive(btn.getAttribute("data-archive-tag-add"), "add"));
+      });
+      $("archiveResults").querySelectorAll("[data-archive-tag-remove]").forEach(btn => {
+        btn.addEventListener("click", () =>
+          tagArchive(btn.getAttribute("data-archive-tag-remove"), "remove"));
+      });
+    }
+
+    async function loadArchive() {
+      const query = archiveFilters().toString();
+      archiveBusy(true);
+      try {
+        const report = await api("/api/archive" + (query ? "?" + query : ""));
+        lastArchive = report;
+        $("archiveSection").hidden = false;
+        $("archiveHint").hidden = true;
+        renderArchive(report);
+      } catch (err) {
+        if (String(err.message).indexOf("DATA_DIR") !== -1) {
+          $("archiveSection").hidden = true;
+          $("archiveHint").hidden = false;
+        } else {
+          $("archiveStatusMessage").textContent = "Error: " + err.message;
+        }
+      } finally {
+        archiveBusy(false);
+      }
+    }
+
+    async function tagArchive(draftId, action) {
+      const input = document.querySelector('[data-archive-tag-input="' + draftId + '"]');
+      const tag = input ? input.value.trim() : "";
+      if (!tag) { $("archiveStatusMessage").textContent = "Enter a tag first."; return; }
+      archiveBusy(true);
+      try {
+        await api("/api/archive/tag", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ draft_id: draftId, tag: tag, action: action })
+        });
+        $("archiveStatusMessage").textContent = "Tag '" + tag + "' " +
+          (action === "add" ? "added." : "removed.");
+        await loadArchive();
+      } catch (err) {
+        $("archiveStatusMessage").textContent = "Error: " + err.message;
+      } finally {
+        archiveBusy(false);
+      }
+    }
+
+    function buildArchiveCsv(report) {
+      const rows = (report.drafts || []).map(d =>
+        [d.draft_id, d.title, d.created_at, d.status, d.band,
+         d.entry_count, (d.tags || []).join("|")]
+      );
+      return buildCsv(
+        ["draft_id", "title", "created_at", "status", "band", "entry_count", "tags"],
+        rows);
+    }
+
+    function downloadArchiveCsv() {
+      if (!lastArchive) return;
+      saveBlob("draft-archive.csv", buildArchiveCsv(lastArchive), "text/csv");
+    }
+
+    function downloadArchiveJson() {
+      if (!lastArchive) return;
+      saveBlob("draft-archive.json", stableJson(lastArchive, null), "application/json");
+    }
+
     $("generate").addEventListener("click", generate);
     $("runDiff").addEventListener("click", runDiff);
     $("loadCsv").addEventListener("click", () => loadSample("csv"));
@@ -1457,11 +1622,21 @@
     $("rejectReview").addEventListener("click", () => submitReview("rejected"));
     $("resetReview").addEventListener("click", () => submitReview("pending"));
     $("copyShare").addEventListener("click", copyShareLink);
+    $("searchArchive").addEventListener("click", loadArchive);
+    $("downloadArchiveCsv").addEventListener("click", downloadArchiveCsv);
+    $("downloadArchiveJson").addEventListener("click", downloadArchiveJson);
+    $("archiveQuery").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); loadArchive(); }
+    });
+    $("archiveTag").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); loadArchive(); }
+    });
     loadSample("csv");
     loadHistory();
     loadProfiles();
     loadTemplates();
     loadProfileCompareSample();
+    loadArchive();
   </script>
 </body>
 </html>

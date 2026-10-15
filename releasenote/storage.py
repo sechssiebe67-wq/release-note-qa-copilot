@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .archive import TAG_ACTIONS, TAG_ADD, validate_tag
 from .models import REVIEW_PENDING, ReviewRecord
 
 
@@ -102,6 +103,16 @@ class DraftStore:
         if limit > 0:
             summaries = summaries[:limit]
         return summaries
+
+    def list_all(self) -> List[Dict[str, Any]]:
+        """Return every stored draft record (oldest first).
+
+        Unlike :meth:`list` this returns the full records, including the stored
+        entries, so callers such as the draft archive can re-run the QA
+        heuristics and match on entry titles.
+        """
+        with self._lock:
+            return list(self._read_all())
 
     def get(self, draft_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -259,3 +270,117 @@ class ReviewStore:
             entries = self._read_audit()
         selected = [e for e in entries if e.get("draft_id") == draft_id]
         return sorted(selected, key=lambda e: e.get("seq", 0))
+
+
+class ArchiveStore:
+    """Append-only tag log for stored drafts.
+
+    Every tag transition is appended to ``<data_dir>/archive.jsonl`` as one
+    JSON object per line with a monotonically increasing ``seq``; the current
+    tag set is the latest line per ``(draft_id, tag)``. Because the log is
+    append-only the full tag history stays recoverable.
+
+    When ``data_dir`` is unset the store falls back to an in-memory list, so
+    the object can still be constructed and exercised but nothing survives a
+    restart. :attr:`is_durable` reports which mode is active.
+    """
+
+    def __init__(self, data_dir: Optional[str] = None) -> None:
+        self.data_dir = data_dir
+        if data_dir:
+            os.makedirs(data_dir, exist_ok=True)
+            self.path: Optional[str] = os.path.join(data_dir, "archive.jsonl")
+        else:
+            self.path = None
+        self._lock = threading.Lock()
+        self._transitions: List[Dict[str, Any]] = []
+
+    @property
+    def is_durable(self) -> bool:
+        """Whether transitions are persisted to disk (``DATA_DIR`` set)."""
+        return self.path is not None
+
+    # -- persistence helpers --------------------------------------------
+    def _read_jsonl(self, path: Optional[str]) -> List[Dict[str, Any]]:
+        if not path or not os.path.exists(path):
+            return []
+        records: List[Dict[str, Any]] = []
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return records
+
+    def _append_jsonl(self, path: str, record: Dict[str, Any]) -> None:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _read_all(self) -> List[Dict[str, Any]]:
+        if self.path:
+            return self._read_jsonl(self.path)
+        return list(self._transitions)
+
+    def _next_seq(self, records: List[Dict[str, Any]]) -> int:
+        if not records:
+            return 1
+        return max(int(record.get("seq", 0)) for record in records) + 1
+
+    # -- public API ------------------------------------------------------
+    def tag(self, draft_id: str, tag: str, action: str) -> Dict[str, Any]:
+        """Append one tag transition and return the stored record.
+
+        ``action`` must be ``add`` or ``remove`` and ``tag`` must be a valid
+        tag; :class:`ValueError` is raised otherwise and nothing is appended.
+        """
+        normalized_tag = validate_tag(tag)
+        normalized_action = (action or "").strip().lower()
+        if normalized_action not in TAG_ACTIONS:
+            raise ValueError("unknown tag action: {!r}".format(action))
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            records = self._read_all()
+            record = {
+                "seq": self._next_seq(records),
+                "draft_id": draft_id,
+                "tag": normalized_tag,
+                "action": normalized_action,
+                "updated_at": timestamp,
+            }
+            if self.path:
+                self._append_jsonl(self.path, record)
+            else:
+                self._transitions.append(record)
+        return record
+
+    def current_tags(self) -> Dict[str, List[str]]:
+        """Return the current tag set per draft id (latest action wins)."""
+        with self._lock:
+            records = self._read_all()
+        latest: Dict[Any, str] = {}
+        for record in sorted(records, key=lambda item: item.get("seq", 0)):
+            draft_id = record.get("draft_id")
+            tag = record.get("tag")
+            if draft_id is None or tag is None:
+                continue
+            latest[(draft_id, tag)] = record.get("action")
+        state: Dict[str, List[str]] = {}
+        for (draft_id, tag), action in latest.items():
+            if action == TAG_ADD:
+                state.setdefault(draft_id, []).append(tag)
+        return {draft_id: sorted(tags) for draft_id, tags in state.items()}
+
+    def tags_for(self, draft_id: str) -> List[str]:
+        """Return the current tags of ``draft_id`` (empty when untagged)."""
+        return self.current_tags().get(draft_id, [])
+
+    def audit(self, draft_id: str) -> List[Dict[str, Any]]:
+        """Return the tag transitions for ``draft_id`` in ``seq`` order."""
+        with self._lock:
+            records = self._read_all()
+        selected = [r for r in records if r.get("draft_id") == draft_id]
+        return sorted(selected, key=lambda item: item.get("seq", 0))
