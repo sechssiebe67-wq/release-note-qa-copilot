@@ -38,6 +38,11 @@ UNTRUSTED = (
     "item.type",
     "item.id",
     "d.title",
+    # Review workflow values echoed back by /api/review.
+    "review.reviewer",
+    "entry.status",
+    "entry.reviewer",
+    "entry.comment",
     # Workspace config values echoed back by /api/generate.
     "config.extra_vague_terms",
     "config.allow_terms",

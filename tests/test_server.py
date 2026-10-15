@@ -80,10 +80,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["format"], "json")
 
-    def test_version_is_0_4_0(self):
+    def test_version_is_0_5_0(self):
         status, body = self._get("/api/version")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["version"], "0.4.0")
+        self.assertEqual(json.loads(body)["version"], "0.5.0")
 
     def test_config_sample_endpoint(self):
         status, body = self._get("/api/config/sample")
@@ -594,6 +594,174 @@ class ServerHistoryTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(self.base + "/api/history/nope", timeout=5)
         self.assertEqual(ctx.exception.code, 404)
+
+
+class _ReviewServerMixin:
+    @classmethod
+    def _start(cls):
+        cls.server, host, port = create_server("127.0.0.1", 0)
+        cls.base = "http://127.0.0.1:{}".format(port)
+        cls.thread = threading.Thread(
+            target=cls.server.serve_forever, daemon=True
+        )
+        cls.thread.start()
+
+    @classmethod
+    def _stop(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def _post_review(self, payload):
+        data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            self.base + "/api/review",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def _get_review(self, draft_id):
+        try:
+            with urllib.request.urlopen(
+                self.base + "/api/review/" + draft_id, timeout=5
+            ) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def _generate(self):
+        request = urllib.request.Request(
+            self.base + "/api/generate",
+            data=json.dumps(
+                {"content": sample("csv")["content"], "format": "csv"}
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+
+class ServerReviewTests(_ReviewServerMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.env = mock.patch.dict(os.environ, {"DATA_DIR": cls.tmp.name})
+        cls.env.start()
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+        cls.env.stop()
+        cls.tmp.cleanup()
+
+    def test_review_happy_path_and_get(self):
+        result = self._generate()
+        self.assertIn("draft_id", result)
+        draft_id = result["draft_id"]
+
+        status, review = self._post_review(
+            {
+                "draft_id": draft_id,
+                "status": "approved",
+                "reviewer": "Ada",
+                "comment": "Ship it",
+            }
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(review["draft_id"], draft_id)
+        self.assertEqual(review["status"], "approved")
+        self.assertEqual(review["reviewer"], "Ada")
+        self.assertEqual(review["comment"], "Ship it")
+        self.assertTrue(review["updated_at"])
+        self.assertEqual(len(review["audit"]), 1)
+
+        status, fetched = self._get_review(draft_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(fetched["status"], "approved")
+        self.assertEqual(len(fetched["audit"]), 1)
+
+    def test_audit_contains_transitions_in_order(self):
+        result = self._generate()
+        draft_id = result["draft_id"]
+        self._post_review(
+            {"draft_id": draft_id, "status": "approved", "reviewer": "Ada"}
+        )
+        self._post_review(
+            {"draft_id": draft_id, "status": "rejected", "reviewer": "Bob"}
+        )
+        _status, fetched = self._get_review(draft_id)
+        self.assertEqual(fetched["status"], "rejected")
+        self.assertEqual(
+            [entry["status"] for entry in fetched["audit"]],
+            ["approved", "rejected"],
+        )
+
+    def test_get_pending_without_review(self):
+        result = self._generate()
+        status, fetched = self._get_review(result["draft_id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(fetched["status"], "pending")
+        self.assertEqual(fetched["audit"], [])
+
+    def test_unknown_status_is_400_and_not_audited(self):
+        result = self._generate()
+        draft_id = result["draft_id"]
+        status, body = self._post_review(
+            {"draft_id": draft_id, "status": "maybe"}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", body)
+        _status, fetched = self._get_review(draft_id)
+        self.assertEqual(fetched["audit"], [])
+
+    def test_missing_draft_id_is_400(self):
+        status, body = self._post_review({"status": "approved"})
+        self.assertEqual(status, 400)
+        self.assertIn("error", body)
+
+    def test_unknown_draft_is_404(self):
+        status, body = self._post_review(
+            {"draft_id": "missing", "status": "approved"}
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("error", body)
+
+    def test_get_unknown_draft_is_404(self):
+        status, body = self._get_review("missing")
+        self.assertEqual(status, 404)
+        self.assertIn("error", body)
+
+
+class ServerReviewInMemoryTests(_ReviewServerMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.env = mock.patch.dict(os.environ, {})
+        cls.env.start()
+        os.environ.pop("DATA_DIR", None)
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+        cls.env.stop()
+
+    def test_review_works_without_history(self):
+        status, review = self._post_review(
+            {"draft_id": "ephemeral", "status": "approved", "reviewer": "Ada"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(review["status"], "approved")
+        status, fetched = self._get_review("ephemeral")
+        self.assertEqual(status, 200)
+        self.assertEqual(fetched["status"], "approved")
 
 
 if __name__ == "__main__":

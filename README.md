@@ -33,7 +33,7 @@ Configuration:
 | --- | --- | --- |
 | `HOST` | `0.0.0.0` | Listen address |
 | `PORT` | `8080` | Listen port |
-| `DATA_DIR` | unset | Enable draft history persisted below this directory |
+| `DATA_DIR` | unset | Enable draft history and durable review/audit logs below this directory |
 
 ## HTTP API
 
@@ -49,8 +49,10 @@ Configuration:
 | GET | `/api/export/draft.json` | Full draft payload as JSON |
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
+| GET | `/api/review/<draft_id>` | Current review status plus the audit trail |
 | POST | `/api/generate` | Build a draft |
 | POST | `/api/diff` | Compare a previous and a current draft |
+| POST | `/api/review` | Record an approve / reject / reset transition |
 
 `POST /api/generate` body:
 
@@ -191,6 +193,55 @@ curl -G 'http://127.0.0.1:8080/api/export/diff.csv' \
 ```
 
 The export capability was added in **v0.4.0**.
+
+## Reviewing a draft
+
+A draft returned by `POST /api/generate` carries a `draft_id` when history is
+enabled. Use it to record a human sign-off. The allowed statuses are `pending`,
+`approved` and `rejected`.
+
+```sh
+curl -X POST 'http://127.0.0.1:8080/api/review' \
+  -H 'Content-Type: application/json' \
+  -d '{"draft_id": "DRAFT_ID", "status": "approved", "reviewer": "Ada", "comment": "Ship it"}'
+```
+
+Response:
+
+```json
+{
+  "draft_id": "DRAFT_ID",
+  "status": "approved",
+  "reviewer": "Ada",
+  "comment": "Ship it",
+  "updated_at": "2026-01-01T12:00:00+00:00",
+  "audit": [
+    {
+      "seq": 1,
+      "draft_id": "DRAFT_ID",
+      "status": "approved",
+      "reviewer": "Ada",
+      "comment": "Ship it",
+      "updated_at": "2026-01-01T12:00:00+00:00",
+      "previous_status": "pending"
+    }
+  ]
+}
+```
+
+Fetch the current status and the full trail with:
+
+```sh
+curl 'http://127.0.0.1:8080/api/review/DRAFT_ID'
+```
+
+An unknown `status` returns HTTP 400 and an unknown `draft_id` returns HTTP
+404; neither appends to the audit log. Durable audit records require history to
+be enabled: set `DATA_DIR` so reviews land in `<DATA_DIR>/reviews.jsonl` and
+`<DATA_DIR>/audit.jsonl` (each transition also gets a monotonically increasing
+`seq`). Without `DATA_DIR` the endpoints still work against an in-memory store,
+but the records are lost on restart and the UI hides the review controls with a
+hint. The review workflow was added in **v0.5.0**.
 
 ## Input format
 

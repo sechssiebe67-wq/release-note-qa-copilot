@@ -26,6 +26,13 @@ SEVERITY_LOW = "low"
 
 _SEVERITY_RANK = {SEVERITY_HIGH: 3, SEVERITY_MEDIUM: 2, SEVERITY_LOW: 1}
 
+# Review workflow states a draft can be in.
+REVIEW_PENDING = "pending"
+REVIEW_APPROVED = "approved"
+REVIEW_REJECTED = "rejected"
+
+REVIEW_STATUSES = (REVIEW_PENDING, REVIEW_APPROVED, REVIEW_REJECTED)
+
 
 @dataclass
 class ChangeEntry:
@@ -109,3 +116,28 @@ def worst_severity(flags: List[Flag]) -> str:
     if not flags:
         return SEVERITY_LOW
     return max(flags, key=lambda f: _SEVERITY_RANK.get(f.severity, 0)).severity
+
+
+@dataclass
+class ReviewRecord:
+    """The latest human review state of a draft.
+
+    ``id`` is the draft id the review belongs to. A record with the default
+    :data:`REVIEW_PENDING` status and no ``updated_at`` means no review has
+    been recorded yet.
+    """
+
+    id: str = ""
+    status: str = REVIEW_PENDING
+    reviewer: str = ""
+    comment: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> Dict[str, str]:
+        return {
+            "id": self.id,
+            "status": self.status,
+            "reviewer": self.reviewer,
+            "comment": self.comment,
+            "updated_at": self.updated_at,
+        }

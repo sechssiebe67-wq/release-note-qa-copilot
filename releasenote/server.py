@@ -17,8 +17,15 @@ from . import __version__
 from .config import WorkspaceConfig
 from .exporters import checklist_csv, diff_csv, draft_json, qa_flags_csv
 from .importer import ParseError
-from .service import build_diff, build_draft, sample, sample_workspace_config
-from .storage import DraftStore
+from .service import (
+    build_diff,
+    build_draft,
+    get_review,
+    record_review,
+    sample,
+    sample_workspace_config,
+)
+from .storage import DraftStore, ReviewStore
 
 MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MiB upload cap.
 MAX_DRAIN_BYTES = 8 * 1024 * 1024  # Bounded read of an over-limit body.
@@ -150,6 +157,16 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(200, record)
             return
+        if path.startswith("/api/review/"):
+            draft_id = path[len("/api/review/"):]
+            review_store = getattr(self.server, "review_store", None)
+            try:
+                payload = get_review(draft_id, review_store)
+            except LookupError as exc:
+                self._send_json(404, {"error": str(exc)})
+                return
+            self._send_json(200, payload)
+            return
         if path in _EXPORTS:
             self._handle_export(path, parsed)
             return
@@ -260,11 +277,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
-        if path not in ("/api/generate", "/api/diff"):
+        if path not in ("/api/generate", "/api/diff", "/api/review"):
             self._send_json(404, {"error": "not found", "path": parsed.path})
             return
         payload = self._parse_body()
         if payload is None:
+            return
+        if path == "/api/review":
+            self._post_review(payload)
             return
         workspace = self._parse_config(payload)
         if workspace is None:
@@ -273,6 +293,41 @@ class Handler(BaseHTTPRequestHandler):
             self._post_generate(payload, workspace)
         else:
             self._post_diff(payload, workspace)
+
+    def _post_review(self, payload: Dict[str, Any]) -> None:
+        draft_id = payload.get("draft_id")
+        if not isinstance(draft_id, str) or not draft_id.strip():
+            self._send_json(400, {"error": "field 'draft_id' is required"})
+            return
+        status = payload.get("status")
+        if not isinstance(status, str) or not status.strip():
+            self._send_json(400, {"error": "field 'status' is required"})
+            return
+        reviewer = payload.get("reviewer", "")
+        comment = payload.get("comment", "")
+        if not isinstance(reviewer, str) or not isinstance(comment, str):
+            self._send_json(
+                400, {"error": "'reviewer' and 'comment' must be strings"}
+            )
+            return
+        review_store = getattr(self.server, "review_store", None)
+        try:
+            record = record_review(
+                draft_id, status, reviewer, comment, review_store
+            )
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except LookupError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        result = record.to_dict()
+        result["draft_id"] = result.pop("id")
+        audit = (
+            review_store.audit(draft_id) if review_store is not None else []
+        )
+        result["audit"] = audit
+        self._send_json(200, result)
 
     def _post_generate(
         self, payload: Dict[str, Any], workspace: WorkspaceConfig
@@ -332,6 +387,7 @@ def create_server(
     server.daemon_threads = True
     data_dir = os.environ.get("DATA_DIR")
     server.store = DraftStore(data_dir) if data_dir else None
+    server.review_store = ReviewStore(data_dir, server.store)
     return server, server.server_address[0], server.server_address[1]
 
 
