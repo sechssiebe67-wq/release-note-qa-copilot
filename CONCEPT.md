@@ -396,9 +396,12 @@ for bad input (including 0, 1 or 21 releases and an unknown profile), and HTTP
 then the CSV/JSON content, blocks separated by a blank line), posts it to
 `POST /api/trend`, renders a table with one row per release, inline SVG
 sparklines for `total` and `sourced_ratio`, a verdict badge per delta and the
-download buttons (built in the browser from the returned payload). The feature
-ships in **v0.7.0** (Python package and Helm chart). No new third-party
-dependency is introduced; the standard library is still the only requirement.
+download buttons (built in the browser from the returned payload). The browser
+formats the trend cells the way Python does (`True`/`False`, integral floats as
+`1.0`/`0.0`, sorted JSON keys) so both downloads are byte-identical to
+`GET /api/export/trend.csv` / `.json` for the same input. The feature ships in
+**v0.7.0** (Python package and Helm chart). No new third-party dependency is
+introduced; the standard library is still the only requirement.
 
 ## Deployment contract
 

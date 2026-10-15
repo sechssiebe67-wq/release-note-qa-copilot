@@ -400,8 +400,10 @@ The browser UI adds a *Trend* section: one release per block (a label line then
 its CSV/JSON content, blocks separated by a blank line), a results table with
 one row per release, inline SVG sparklines for `total` and `sourced_ratio`, a
 verdict badge per delta and the *Download trend CSV* / *Download trend JSON*
-buttons. Trend analysis was added in **v0.7.0**; no third-party dependency is
-required.
+buttons. Both buttons are built in the browser from the returned payload and
+emit exactly the same bytes as `GET /api/export/trend.csv` / `.json` (Python's
+`True`/`False` and `1.0`/`0.0` text, sorted JSON keys). Trend analysis was
+added in **v0.7.0**; no third-party dependency is required.
 
 ## Input format
 

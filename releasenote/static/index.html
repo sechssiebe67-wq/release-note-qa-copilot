@@ -625,6 +625,36 @@
         .join("\n") + "\n";
     }
 
+    // Mirror Python's str()/json formatting for the two trend scalar types
+    // that differ from JavaScript so the browser downloads match the
+    // /api/export/trend.* output byte-for-byte.
+    function pyBool(value) {
+      return value ? "True" : "False";
+    }
+
+    function pyFloat(value) {
+      // Python keeps the decimal point on integral floats (1.0, 0.0).
+      return Number.isInteger(value) ? value.toFixed(1) : String(value);
+    }
+
+    function stableJson(value, key) {
+      if (value === null || value === undefined) return "null";
+      if (typeof value === "boolean") return value ? "true" : "false";
+      if (typeof value === "number") {
+        if (!isFinite(value)) throw new Error("non-finite number");
+        // sourced_ratio and its deltas are the only float fields; Python
+        // renders integral floats as "1.0" rather than "1".
+        return key === "sourced_ratio" ? pyFloat(value) : String(value);
+      }
+      if (typeof value === "string") return JSON.stringify(value);
+      if (Array.isArray(value)) {
+        return "[" + value.map(item => stableJson(item, null)).join(", ") + "]";
+      }
+      return "{" + Object.keys(value).sort().map(k =>
+        JSON.stringify(k) + ": " + stableJson(value[k], k)
+      ).join(", ") + "}";
+    }
+
     function saveBlob(name, text, type) {
       const blob = new Blob([text], { type: type });
       const url = URL.createObjectURL(blob);
@@ -810,20 +840,29 @@
       }
     }
 
-    function downloadTrendCsv() {
-      if (!lastTrend) return;
+    function buildTrendCsv(report) {
       const header = ["label", "entry_count", "high", "medium", "low", "total",
         "publishable", "sourced_ratio", "vague_hits", "banned_hits"];
-      const rows = (lastTrend.releases || []).map(r =>
+      const rows = (report.releases || []).map(r =>
         [r.label, r.entry_count, r.counts.high, r.counts.medium, r.counts.low,
-         r.counts.total, r.publishable, r.sourced_ratio, r.vague_hits, r.banned_hits]
+         r.counts.total, pyBool(r.publishable), pyFloat(r.sourced_ratio),
+         r.vague_hits, r.banned_hits]
       );
-      saveBlob("release-trend.csv", buildCsv(header, rows), "text/csv");
+      return buildCsv(header, rows);
+    }
+
+    function buildTrendJson(report) {
+      return stableJson(report, null);
+    }
+
+    function downloadTrendCsv() {
+      if (!lastTrend) return;
+      saveBlob("release-trend.csv", buildTrendCsv(lastTrend), "text/csv");
     }
 
     function downloadTrendJson() {
       if (!lastTrend) return;
-      saveBlob("release-trend.json", JSON.stringify(lastTrend, null, 2), "application/json");
+      saveBlob("release-trend.json", buildTrendJson(lastTrend), "application/json");
     }
 
     function download() {
