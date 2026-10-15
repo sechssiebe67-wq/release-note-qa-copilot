@@ -17,6 +17,16 @@ from .models import (
     REVIEW_REJECTED,
     REVIEW_STATUSES,
 )
+from .archive import (
+    ARCHIVE_BANDS,
+    ARCHIVE_STATUSES,
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    MAX_TAG_LENGTH,
+    filter_drafts,
+    normalize_tag,
+    validate_tag,
+)
 from .config import WorkspaceConfig
 from .profiles import (
     BUILTIN_PROFILES,
@@ -49,6 +59,8 @@ from .compare import compute_comparison
 from .profile_compare import compare_profiles
 from .score import compute_score
 from .exporters import (
+    archive_csv,
+    archive_json,
     checklist_csv,
     comparison_csv,
     comparison_json,
@@ -67,15 +79,18 @@ from .exporters import (
     trend_csv,
     trend_json,
 )
-from .storage import DraftStore, ReviewStore
+from .storage import ArchiveStore, DraftStore, ReviewStore
 from .service import (
     HistoryRequiredError,
+    build_archive,
     build_comparison,
     build_profile_comparison,
     build_trend,
+    get_archive_entry,
     get_review,
     get_shared_draft,
     record_review,
+    tag_draft,
 )
 
 __all__ = [
@@ -89,6 +104,14 @@ __all__ = [
     "REVIEW_APPROVED",
     "REVIEW_REJECTED",
     "REVIEW_STATUSES",
+    "ARCHIVE_BANDS",
+    "ARCHIVE_STATUSES",
+    "DEFAULT_LIMIT",
+    "MAX_LIMIT",
+    "MAX_TAG_LENGTH",
+    "filter_drafts",
+    "normalize_tag",
+    "validate_tag",
     "WorkspaceConfig",
     "RuleProfile",
     "UnknownProfileError",
@@ -143,12 +166,18 @@ __all__ = [
     "comparison_json",
     "profile_comparison_csv",
     "profile_comparison_json",
+    "archive_csv",
+    "archive_json",
     "DraftStore",
     "ReviewStore",
+    "ArchiveStore",
     "record_review",
     "get_review",
     "get_shared_draft",
+    "build_archive",
+    "get_archive_entry",
+    "tag_draft",
     "HistoryRequiredError",
 ]
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"

@@ -44,6 +44,17 @@ TREND_HEADER = (
 COMPARISON_HEADER = TREND_HEADER
 COMPARISON_MATRIX_HEADER = ("key", "id", "title", "type")
 
+# The draft archive listing, one row per stored draft.
+ARCHIVE_HEADER = (
+    "draft_id",
+    "title",
+    "created_at",
+    "status",
+    "band",
+    "entry_count",
+    "tags",
+)
+
 # The profile comparison table repeats the same metrics keyed by profile name.
 PROFILE_COMPARISON_HEADER = (
     "profile",
@@ -435,6 +446,41 @@ def profile_comparison_json(report: Mapping[str, Any]) -> str:
     )
 
 
+def archive_csv(report: Mapping[str, Any]) -> str:
+    """Return one CSV row per archived draft.
+
+    Header: ``draft_id,title,created_at,status,band,entry_count,tags`` with the
+    tags joined by ``|``. A report without a ``drafts`` list yields just the
+    header row, so the shape is always stable.
+    """
+    rows = []
+    for item in _as_list(_as_mapping(report).get("drafts")):
+        draft = _as_mapping(item)
+        tags = _as_list(draft.get("tags"))
+        rows.append(
+            (
+                draft.get("draft_id", ""),
+                draft.get("title", ""),
+                draft.get("created_at", ""),
+                draft.get("status", ""),
+                draft.get("band", ""),
+                draft.get("entry_count", 0),
+                "|".join(str(tag) for tag in tags),
+            )
+        )
+    return _render_csv(ARCHIVE_HEADER, rows)
+
+
+def archive_json(report: Mapping[str, Any]) -> str:
+    """Serialise an archive listing as stable, UTF-8 JSON without NaN."""
+    return json.dumps(
+        report,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
 __all__ = [
     "QA_FLAG_HEADER",
     "CHECKLIST_HEADER",
@@ -446,6 +492,7 @@ __all__ = [
     "COMPARISON_HEADER",
     "COMPARISON_MATRIX_HEADER",
     "PROFILE_COMPARISON_HEADER",
+    "ARCHIVE_HEADER",
     "DIFF_CATEGORIES",
     "qa_flags_csv",
     "checklist_csv",
@@ -464,4 +511,6 @@ __all__ = [
     "comparison_json",
     "profile_comparison_csv",
     "profile_comparison_json",
+    "archive_csv",
+    "archive_json",
 ]
