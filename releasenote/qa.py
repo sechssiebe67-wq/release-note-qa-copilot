@@ -80,6 +80,21 @@ def _vague_pattern(config: WorkspaceConfig):
     )
 
 
+def vague_terms_in(
+    text: str, config: Optional[WorkspaceConfig] = None
+) -> List[str]:
+    """Return the lower-cased vague terms found in ``text``.
+
+    Used by the release-diff to compare the wording of the same benefit
+    between two releases under the effective workspace rules.
+    """
+    config = config or WorkspaceConfig.default()
+    pattern = _vague_pattern(config)
+    if pattern is None:
+        return []
+    return sorted({m.group(0).lower() for m in pattern.finditer(text or "")})
+
+
 def _with_override(flag: Flag, config: WorkspaceConfig) -> Flag:
     """Apply a configured severity override to ``flag`` (in place)."""
     override = config.severity_overrides.get(flag.code)

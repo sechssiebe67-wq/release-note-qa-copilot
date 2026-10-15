@@ -77,10 +77,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["format"], "json")
 
-    def test_version_is_0_2_0(self):
+    def test_version_is_0_3_0(self):
         status, body = self._get("/api/version")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["version"], "0.2.0")
+        self.assertEqual(json.loads(body)["version"], "0.3.0")
 
     def test_config_sample_endpoint(self):
         status, body = self._get("/api/config/sample")
@@ -221,6 +221,151 @@ class ServerTests(unittest.TestCase):
             urllib.request.urlopen(request, timeout=5)
         self.assertEqual(ctx.exception.code, 422)
 
+    def test_diff_endpoint_happy_path(self):
+        previous = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Fast and reliable,SRC-A,https://a\n"
+        )
+        current = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Reliable and fast,,\n"
+            "B,fix,Beta,Beta description,Gamma value,SRC-B,\n"
+        )
+        status, result = self._post(
+            "/api/diff",
+            {
+                "previous": previous,
+                "current": current,
+                "format": "csv",
+                "title": "Release 5",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["title"], "Release 5")
+        for key in ("markdown", "qa", "checklist", "config", "diff"):
+            self.assertIn(key, result)
+        self.assertEqual(
+            set(result["diff"]),
+            {
+                "added",
+                "changed",
+                "removed",
+                "unchanged",
+                "repeated_claims",
+                "regressions",
+            },
+        )
+
+    def test_diff_flags_lost_source_regression(self):
+        previous = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Fast and reliable,SRC-A,https://a\n"
+        )
+        current = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Reliable and fast,,\n"
+        )
+        status, result = self._post(
+            "/api/diff",
+            {"previous": previous, "current": current, "format": "csv"},
+        )
+        self.assertEqual(status, 200)
+        unsourced = [
+            f
+            for f in result["qa"]["flags"]
+            if f["code"] == "regression_unsourced"
+        ]
+        self.assertEqual(len(unsourced), 1)
+        self.assertEqual(unsourced[0]["severity"], "high")
+        self.assertTrue(
+            any(item["id"] == "A" for item in result["diff"]["regressions"])
+        )
+
+    def test_diff_honours_severity_override(self):
+        previous = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Fast and reliable,SRC-A,https://a\n"
+        )
+        current = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Reliable and fast,,\n"
+        )
+        status, result = self._post(
+            "/api/diff",
+            {
+                "previous": previous,
+                "current": current,
+                "format": "csv",
+                "config": {
+                    "severity_overrides": {"regression_unsourced": "low"}
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+        flag = next(
+            f
+            for f in result["qa"]["flags"]
+            if f["code"] == "regression_unsourced"
+        )
+        self.assertEqual(flag["severity"], "low")
+
+    def test_diff_rejects_missing_current(self):
+        status, result = self._post_status(
+            "/api/diff",
+            {"previous": sample("csv")["content"], "format": "csv"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", result)
+
+    def test_diff_rejects_invalid_config(self):
+        status, result = self._post_status(
+            "/api/diff",
+            {
+                "previous": sample("csv")["content"],
+                "current": sample("csv")["content"],
+                "config": {"nope": []},
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", result)
+
+    def test_diff_rejects_malformed_body(self):
+        request = urllib.request.Request(
+            self.base + "/api/diff",
+            data=b"not-json",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_diff_rejects_oversized_body(self):
+        huge = "x" * (2 * 1024 * 1024 + 10)
+        request = urllib.request.Request(
+            self.base + "/api/diff",
+            data=json.dumps(
+                {"previous": huge, "current": huge, "format": "csv"}
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=10)
+        self.assertEqual(ctx.exception.code, 413)
+
+    def test_diff_rejects_unparseable_content(self):
+        status, result = self._post_status(
+            "/api/diff",
+            {
+                "previous": "foo,bar\n1,2\n",
+                "current": "foo,bar\n1,2\n",
+                "format": "csv",
+            },
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("error", result)
+
     def test_unknown_path_404(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(self.base + "/nope", timeout=5)
@@ -297,6 +442,35 @@ class ServerHistoryTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 400)
         error = json.loads(ctx.exception.read().decode("utf-8"))
         self.assertIn("error", error)
+
+        with urllib.request.urlopen(
+            self.base + "/api/history", timeout=5
+        ) as resp:
+            after = json.loads(resp.read().decode("utf-8"))["drafts"]
+        self.assertEqual(len(after), len(before))
+
+    def test_diff_invalid_config_is_not_stored(self):
+        with urllib.request.urlopen(
+            self.base + "/api/history", timeout=5
+        ) as resp:
+            before = json.loads(resp.read().decode("utf-8"))["drafts"]
+
+        request = urllib.request.Request(
+            self.base + "/api/diff",
+            data=json.dumps(
+                {
+                    "previous": sample("csv")["content"],
+                    "current": sample("csv")["content"],
+                    "format": "csv",
+                    "config": {"bogus_key": []},
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
 
         with urllib.request.urlopen(
             self.base + "/api/history", timeout=5

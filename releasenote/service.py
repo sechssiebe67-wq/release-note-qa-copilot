@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 
 from .config import WorkspaceConfig, sample_config
+from .diff import compute_diff
 from .generator import render_markdown
 from .grouping import group_entries, group_titles
 from .importer import parse_entries, sample_csv, sample_json
-from .models import ChangeEntry
+from .models import ChangeEntry, QAResult
 from .qa import analyze_entries, checklist
 
 ConfigInput = Optional[Union[WorkspaceConfig, Dict[str, Any]]]
@@ -39,24 +40,13 @@ def _entry_dict(entry: ChangeEntry) -> Dict[str, Any]:
     }
 
 
-def build_draft(
-    content: str,
-    fmt: str = "auto",
-    title: str = "Release Notes",
-    config: ConfigInput = None,
+def _assemble(
+    entries: List[ChangeEntry],
+    qa: QAResult,
+    workspace: WorkspaceConfig,
+    title: str,
 ) -> Dict[str, Any]:
-    """Parse ``content`` and return draft, groups and QA data.
-
-    ``config`` is an optional workspace config mapping (or a
-    :class:`~releasenote.config.WorkspaceConfig`). It is validated and its
-    effective form is echoed back under the ``config`` key.
-
-    Raises :class:`releasenote.importer.ParseError` for invalid input and
-    :class:`ValueError` for an invalid config.
-    """
-    workspace = _coerce_config(config)
-    entries = parse_entries(content, fmt)
-    qa = analyze_entries(entries, workspace)
+    """Build the standard draft payload shared by generate and diff."""
     groups = group_entries(entries)
     titles = group_titles()
     return {
@@ -76,6 +66,55 @@ def build_draft(
         "config": workspace.to_dict(),
         "markdown": render_markdown(title, entries, qa),
     }
+
+
+def build_draft(
+    content: str,
+    fmt: str = "auto",
+    title: str = "Release Notes",
+    config: ConfigInput = None,
+) -> Dict[str, Any]:
+    """Parse ``content`` and return draft, groups and QA data.
+
+    ``config`` is an optional workspace config mapping (or a
+    :class:`~releasenote.config.WorkspaceConfig`). It is validated and its
+    effective form is echoed back under the ``config`` key.
+
+    Raises :class:`releasenote.importer.ParseError` for invalid input and
+    :class:`ValueError` for an invalid config.
+    """
+    workspace = _coerce_config(config)
+    entries = parse_entries(content, fmt)
+    qa = analyze_entries(entries, workspace)
+    return _assemble(entries, qa, workspace, title)
+
+
+def build_diff(
+    previous_content: str,
+    current_content: str,
+    fmt: str = "auto",
+    title: str = "Release Notes",
+    config: ConfigInput = None,
+) -> Dict[str, Any]:
+    """Compare a previous and a current draft and annotate the current one.
+
+    Both inputs are parsed with the same ``fmt`` rules as
+    :func:`build_draft`. The standard draft payload is returned with the
+    diff flags merged into ``qa`` and a ``diff`` key holding the classified
+    entries, repeated claims and regressions.
+
+    Raises :class:`releasenote.importer.ParseError` for invalid input and
+    :class:`ValueError` for an invalid config.
+    """
+    workspace = _coerce_config(config)
+    previous = parse_entries(previous_content, fmt)
+    current = parse_entries(current_content, fmt)
+    diff, diff_flags = compute_diff(previous, current, workspace)
+    qa = analyze_entries(current, workspace)
+    qa.flags.extend(diff_flags)
+    payload = _assemble(current, qa, workspace, title)
+    payload["diff"] = diff
+    return payload
 
 
 def sample(fmt: str = "csv") -> Dict[str, str]:

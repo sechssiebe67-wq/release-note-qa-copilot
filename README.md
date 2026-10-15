@@ -12,6 +12,7 @@ unsupported claims are flagged before publishing.
 - Get a short QA checklist and a publishability verdict.
 - Tailor the QA rules per workspace (extra/allowed terms, banned phrases,
   required sections, severity overrides).
+- Diff two releases to highlight regressions and repeated claims.
 - Export Markdown for Confluence, GitHub Releases or e-mail.
 
 See [CONCEPT.md](CONCEPT.md) for the product goal, users and roadmap.
@@ -44,6 +45,7 @@ Configuration:
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
 | POST | `/api/generate` | Build a draft |
+| POST | `/api/diff` | Compare a previous and a current draft |
 
 `POST /api/generate` body:
 
@@ -89,6 +91,57 @@ the built-in rules and severities are unchanged.
 
 The response echoes the effective config under `config` so reviewers can see
 which rules produced each flag. Workspace rules were added in **v0.2.0**.
+
+## Comparing releases
+
+`POST /api/diff` compares a previous release with the current draft and flags
+what changed, what was repeated and where a claim regressed. It accepts the
+same `format`, `title` and `config` fields as `/api/generate`, plus `previous`
+and `current` (both CSV or JSON text).
+
+```json
+{
+  "format": "csv",
+  "title": "Release 2.0",
+  "previous": "id,type,title,description,benefit,source\nA,feature,Bulk export,Export all reports,Cuts weekly effort,REL-1\n",
+  "current": "id,type,title,description,benefit,source\nA,feature,Bulk export,Export all reports,Exports every report in one click,\n"
+}
+```
+
+Response (all lists contain `id`, `title`, `type` and a human-readable
+`reason`):
+
+```json
+{
+  "markdown": "# Release 2.0\n...",
+  "qa": { "publishable": false, "counts": { "high": 2, "medium": 1, "low": 0, "total": 3 }, "flags": [] },
+  "checklist": [],
+  "config": {},
+  "diff": {
+    "added": [],
+    "changed": [{ "id": "A", "title": "Bulk export", "type": "feature", "reason": "Changed fields: benefit, source." }],
+    "removed": [],
+    "unchanged": [],
+    "repeated_claims": [{ "id": "A", "title": "Bulk export", "type": "feature", "reason": "Title and description unchanged from the previous release." }],
+    "regressions": [{ "id": "A", "title": "Bulk export", "type": "feature", "reason": "Previously sourced entry no longer has a source or link. Previously publishable entry now has high-severity flag(s): missing_source." }]
+  }
+}
+```
+
+An entry is matched on `id` first, then on its normalized title. The diff adds
+these flags to the current draft's `qa` result (and honours
+`severity_overrides`):
+
+| Flag | Severity | Meaning |
+| --- | --- | --- |
+| `regression_unsourced` | high | An entry lost the source/link it had before. |
+| `regression_vague_benefit` | medium | A previously non-vague benefit now has a vague term. |
+| `repeated_claim` | medium | Reused benefit text or an unchanged title + description. |
+
+Invalid bodies behave like `/api/generate`: malformed JSON or a missing
+`previous`/`current` field returns HTTP 400, an unparseable payload returns
+HTTP 422, a body over 2 MiB returns HTTP 413, and an invalid `config` returns
+HTTP 400 without storing a draft. The release diff was added in **v0.3.0**.
 
 ## Input format
 
