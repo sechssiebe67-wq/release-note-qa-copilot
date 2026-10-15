@@ -16,9 +16,14 @@ from .models import (
     QAResult,
     ReviewRecord,
 )
-from .profiles import rule_summary
+from .profiles import (
+    normalize_profile_name,
+    resolve_config,
+    rule_summary,
+)
 from .qa import analyze_entries, checklist
 from .storage import ReviewStore
+from .trend import compute_trend
 
 ConfigInput = Optional[Union[WorkspaceConfig, Dict[str, Any]]]
 
@@ -131,6 +136,37 @@ def build_diff(
     return payload
 
 
+def build_trend(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate ``payload`` and return a multi-release trend report.
+
+    ``payload`` carries an ordered ``releases`` list of 2–20
+    ``{label, content, format}`` objects plus the optional ``profile`` and
+    ``config`` fields. The resolved config, the resolved profile name and the
+    effective-rule summary for the last release are echoed back alongside the
+    trend itself.
+
+    Raises :class:`ValueError` for a malformed payload, a release count
+    outside 2–20, empty content or an invalid config,
+    :class:`releasenote.profiles.UnknownProfileError` for an unknown profile
+    and :class:`releasenote.importer.ParseError` for unparseable content.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+    releases = payload.get("releases")
+    workspace = resolve_config(payload)
+    profile_name = normalize_profile_name(payload.get("profile"))
+    report = compute_trend(releases, workspace, profile_name)
+
+    last = releases[-1]
+    fmt = last.get("format", "auto")
+    entries = parse_entries(last["content"], fmt)
+    qa = analyze_entries(entries, workspace)
+    report["config"] = workspace.to_dict()
+    report["profile"] = profile_name
+    report["rules"] = rule_summary(entries, qa, workspace)
+    return report
+
+
 def sample(fmt: str = "csv") -> Dict[str, str]:
     """Return example content for the UI and API."""
     fmt = (fmt or "csv").strip().lower()
@@ -142,6 +178,55 @@ def sample(fmt: str = "csv") -> Dict[str, str]:
 def sample_workspace_config() -> Dict[str, Any]:
     """Return the documented example workspace config for the API/UI."""
     return sample_config()
+
+
+def sample_trend() -> Dict[str, Any]:
+    """Return a three-release example payload for ``GET /api/trend/sample``.
+
+    The releases improve from a high number of flags to a clean draft, so the
+    sample exercises every verdict (``improving``) and both sparkline series.
+    """
+    return {
+        "releases": [
+            {
+                "label": "2026.1",
+                "format": "csv",
+                "content": (
+                    "id,type,title,description,benefit,source\n"
+                    "REL-1,feature,Bulk export,Export all reports in one click,"
+                    "A much better experience,\n"
+                    "REL-2,fix,Timezone fix,Timestamps render in local time,"
+                    "No more confusing dates,\n"
+                ),
+            },
+            {
+                "label": "2026.2",
+                "format": "csv",
+                "content": (
+                    "id,type,title,description,benefit,source\n"
+                    "REL-1,feature,Bulk export,Export all reports in one click,"
+                    "One-click export saves time,REL-1\n"
+                    "REL-2,fix,Timezone fix,Timestamps render in local time,"
+                    "Correct local times,REL-2\n"
+                    "REL-3,feature,Better search,Search is improved,"
+                    "Find things faster,REL-3\n"
+                ),
+            },
+            {
+                "label": "2026.3",
+                "format": "csv",
+                "content": (
+                    "id,type,title,description,benefit,source\n"
+                    "REL-1,feature,Bulk export,Export all reports in one click,"
+                    "One-click export saves time,REL-1\n"
+                    "REL-2,fix,Timezone fix,Timestamps render in local time,"
+                    "Correct local times,REL-2\n"
+                    "REL-3,feature,Search filters,Filter search results by team,"
+                    "Relevant results only,REL-3\n"
+                ),
+            },
+        ]
+    }
 
 
 def record_review(

@@ -80,10 +80,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["format"], "json")
 
-    def test_version_is_0_6_0(self):
+    def test_version_is_0_7_0(self):
         status, body = self._get("/api/version")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["version"], "0.6.0")
+        self.assertEqual(json.loads(body)["version"], "0.7.0")
 
     def test_config_sample_endpoint(self):
         status, body = self._get("/api/config/sample")

@@ -46,11 +46,14 @@ Configuration:
 | GET | `/api/sample?format=csv\|json` | Example import payload |
 | GET | `/api/config/sample` | Example workspace-rules config |
 | GET | `/api/profiles` | Built-in QA rule profiles (`name`, `description`, `config`) |
+| GET | `/api/trend/sample` | Example 3-release trend payload |
 | GET | `/api/export/qa.csv` | QA flags as CSV (`entry_id,code,severity,message`) |
 | GET | `/api/export/checklist.csv` | QA checklist as CSV (`label,status,detail`) |
 | GET | `/api/export/diff.csv` | Release diff as CSV (`category,id,title,type,reason`) |
 | GET | `/api/export/rules.csv` | Effective rule summary as CSV (`code,severity,count`) |
 | GET | `/api/export/rules.json` | Effective rule summary as JSON |
+| GET | `/api/export/trend.csv` | Multi-release trend as CSV |
+| GET | `/api/export/trend.json` | Multi-release trend as JSON |
 | GET | `/api/export/draft.json` | Full draft payload as JSON |
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
@@ -58,6 +61,7 @@ Configuration:
 | POST | `/api/generate` | Build a draft |
 | POST | `/api/diff` | Compare a previous and a current draft |
 | POST | `/api/review` | Record an approve / reject / reset transition |
+| POST | `/api/trend` | Analyse an ordered list of 2–20 releases |
 
 `POST /api/generate` body:
 
@@ -299,6 +303,107 @@ be enabled: set `DATA_DIR` so reviews land in `<DATA_DIR>/reviews.jsonl` and
 `seq`). Without `DATA_DIR` the endpoints still work against an in-memory store,
 but the records are lost on restart and the UI hides the review controls with a
 hint. The review workflow was added in **v0.5.0**.
+
+## Trend analysis
+
+A single draft or a pairwise diff cannot answer "is our release quality getting
+better or worse over the last N releases?". `POST /api/trend` takes an ordered
+list of **2–20** releases (oldest first), QA-checks each with the same rules as
+`POST /api/generate`, and returns per-release metrics plus the direction of
+travel between consecutive releases. Everything is deterministic and offline.
+
+```json
+{
+  "releases": [
+    { "label": "2026.1", "format": "csv", "content": "id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,A much better experience,\n" },
+    { "label": "2026.2", "format": "csv", "content": "id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,One-click export saves time,REL-1\n" }
+  ],
+  "profile": "strict",
+  "config": {}
+}
+```
+
+`profile` and `config` are both optional and resolve exactly like
+`POST /api/generate`. The response contains:
+
+```json
+{
+  "releases": [
+    {
+      "label": "2026.1",
+      "entry_count": 1,
+      "counts": { "high": 1, "medium": 1, "low": 0, "total": 2 },
+      "publishable": false,
+      "sourced_ratio": 0.0,
+      "vague_hits": 1,
+      "banned_hits": 0
+    }
+  ],
+  "deltas": [
+    {
+      "from": "2026.1", "to": "2026.2",
+      "high": -1, "medium": -1, "total": -2,
+      "sourced_ratio": 1.0, "verdict": "improving"
+    }
+  ],
+  "overall": { "verdict": "improving", "best": "2026.2", "worst": "2026.1" },
+  "config": {},
+  "profile": "strict",
+  "rules": {}
+}
+```
+
+`deltas` has one entry per consecutive pair and `overall` classifies the first
+release against the last. The verdict rule is deterministic: compare the `high`
+count first, then `total`, then `sourced_ratio`; the first metric that differs
+decides (`improving` when strictly better on that metric, `regressing` when
+strictly worse), otherwise the verdict is `stable`.
+
+Bad input behaves like the rest of the API: 0, 1 or 21 releases, a missing
+`content`, a non-object body or an invalid `config` returns HTTP 400, an unknown
+`profile` returns HTTP 400 naming it, and unparseable content returns HTTP 422.
+
+Download the report directly (each repeated `release` is `label:content`,
+URL-encoded):
+
+```sh
+curl -X POST 'http://127.0.0.1:8080/api/trend' \
+  -H 'Content-Type: application/json' \
+  -d '{"releases": [
+        {"label": "2026.1", "format": "csv", "content": "id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,A much better experience,\n"},
+        {"label": "2026.2", "format": "csv", "content": "id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,One-click export saves time,REL-1\n"}
+      ]}'
+```
+
+```sh
+curl -G 'http://127.0.0.1:8080/api/export/trend.csv' \
+  --data-urlencode 'format=csv' \
+  --data-urlencode $'release=2026.1:id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,A much better experience,\n' \
+  --data-urlencode $'release=2026.2:id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,One-click export saves time,REL-1\n'
+```
+
+```sh
+curl 'http://127.0.0.1:8080/api/trend/sample'
+```
+
+`GET /api/export/trend.csv` (or `trend.json`) accepts the same repeated
+`release=label:content` parameters plus an optional `profile` and answers with
+`text/csv` / `application/json` and a `Content-Disposition: attachment` header.
+The CSV columns are:
+
+```csv
+label,entry_count,high,medium,low,total,publishable,sourced_ratio,vague_hits,banned_hits
+2026.1,1,1,1,0,2,False,0.0,1,0
+```
+
+The browser UI adds a *Trend* section: one release per block (a label line then
+its CSV/JSON content, blocks separated by a blank line), a results table with
+one row per release, inline SVG sparklines for `total` and `sourced_ratio`, a
+verdict badge per delta and the *Download trend CSV* / *Download trend JSON*
+buttons. Both buttons are built in the browser from the returned payload and
+emit exactly the same bytes as `GET /api/export/trend.csv` / `.json` (Python's
+`True`/`False` and `1.0`/`0.0` text, sorted JSON keys). Trend analysis was
+added in **v0.7.0**; no third-party dependency is required.
 
 ## Input format
 

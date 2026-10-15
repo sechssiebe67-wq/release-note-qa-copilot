@@ -22,6 +22,8 @@ from .exporters import (
     qa_flags_csv,
     rules_csv,
     rules_json,
+    trend_csv,
+    trend_json,
 )
 from .importer import ParseError
 from .profiles import (
@@ -33,9 +35,11 @@ from .profiles import (
 from .service import (
     build_diff,
     build_draft,
+    build_trend,
     get_review,
     record_review,
     sample,
+    sample_trend,
     sample_workspace_config,
 )
 from .storage import DraftStore, ReviewStore
@@ -52,6 +56,15 @@ _EXPORTS = {
     "/api/export/rules.csv": ("text/csv", "qa-rules.csv"),
     "/api/export/rules.json": ("application/json; charset=utf-8", "qa-rules.json"),
     "/api/export/draft.json": ("application/json; charset=utf-8", "release-draft.json"),
+}
+
+# Trend exports built from repeated ``release=label:content`` query params.
+_TREND_EXPORTS = {
+    "/api/export/trend.csv": ("text/csv", "release-trend.csv"),
+    "/api/export/trend.json": (
+        "application/json; charset=utf-8",
+        "release-trend.json",
+    ),
 }
 _FORMATS = ("auto", "csv", "json")
 
@@ -157,6 +170,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/profiles":
             self._send_json(200, {"profiles": list_profiles()})
             return
+        if path == "/api/trend/sample":
+            self._send_json(200, sample_trend())
+            return
         if path == "/api/history":
             store = getattr(self.server, "store", None)
             query = parse_qs(parsed.query)
@@ -185,10 +201,63 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, payload)
             return
+        if path in _TREND_EXPORTS:
+            self._handle_trend_export(path, parsed)
+            return
         if path in _EXPORTS:
             self._handle_export(path, parsed)
             return
         self._send_json(404, {"error": "not found", "path": parsed.path})
+
+    def _handle_trend_export(self, path: str, parsed: Any) -> None:
+        """Serve a trend CSV/JSON export built from query parameters.
+
+        Each repeated ``release`` parameter is ``label:content`` (URL-encoded),
+        in release order; an optional ``format`` applies to every release and
+        an optional ``profile`` selects a named rule profile. Missing or
+        invalid parameters return 400, an unknown profile returns 400 naming
+        it and unparseable content returns 422.
+        """
+        query = parse_qs(parsed.query)
+        fmt = _first(query, "format", "auto")
+        if fmt not in _FORMATS:
+            self._send_json(400, {"error": "unsupported format: {!r}".format(fmt)})
+            return
+        raw_releases = query.get("release") or []
+        releases = []
+        for value in raw_releases:
+            label, separator, content = value.partition(":")
+            if not separator or not content.strip():
+                self._send_json(
+                    400, {"error": "each 'release' must be 'label:content'"}
+                )
+                return
+            releases.append(
+                {"label": label.strip(), "content": content, "format": fmt}
+            )
+        payload = {
+            "releases": releases,
+            "profile": _first(query, "profile"),
+        }
+        try:
+            report = build_trend(payload)
+        except UnknownProfileError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        body = trend_csv(report) if path.endswith(".csv") else trend_json(report)
+        content_type, filename = _TREND_EXPORTS[path]
+        self._send(
+            200,
+            body.encode("utf-8"),
+            content_type,
+            {"Content-Disposition": 'attachment; filename="{}"'.format(filename)},
+        )
 
     def _handle_export(self, path: str, parsed: Any) -> None:
         """Serve a CSV or JSON export built from query parameters.
@@ -320,7 +389,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
-        if path not in ("/api/generate", "/api/diff", "/api/review"):
+        if path not in ("/api/generate", "/api/diff", "/api/review", "/api/trend"):
             self._send_json(404, {"error": "not found", "path": parsed.path})
             return
         payload = self._parse_body()
@@ -328,6 +397,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/review":
             self._post_review(payload)
+            return
+        if path == "/api/trend":
+            self._post_trend(payload)
             return
         resolved = self._resolve_request(payload)
         if resolved is None:
@@ -371,6 +443,20 @@ class Handler(BaseHTTPRequestHandler):
             review_store.audit(draft_id) if review_store is not None else []
         )
         result["audit"] = audit
+        self._send_json(200, result)
+
+    def _post_trend(self, payload: Dict[str, Any]) -> None:
+        try:
+            result = build_trend(payload)
+        except UnknownProfileError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
         self._send_json(200, result)
 
     def _post_generate(

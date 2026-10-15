@@ -32,6 +32,7 @@ from .grouping import group_entries
 from .qa import analyze_entries, analyze_entry, effective_vague_terms
 from .generator import render_markdown, render_qa_checklist
 from .diff import diff_drafts, compute_diff
+from .trend import compute_trend
 from .exporters import (
     checklist_csv,
     diff_csv,
@@ -39,9 +40,11 @@ from .exporters import (
     qa_flags_csv,
     rules_csv,
     rules_json,
+    trend_csv,
+    trend_json,
 )
 from .storage import DraftStore, ReviewStore
-from .service import record_review, get_review
+from .service import build_trend, record_review, get_review
 
 __all__ = [
     "ChangeEntry",
@@ -74,11 +77,15 @@ __all__ = [
     "render_qa_checklist",
     "diff_drafts",
     "compute_diff",
+    "compute_trend",
+    "build_trend",
     "qa_flags_csv",
     "checklist_csv",
     "diff_csv",
     "rules_csv",
     "rules_json",
+    "trend_csv",
+    "trend_json",
     "draft_json",
     "DraftStore",
     "ReviewStore",
@@ -86,4 +93,4 @@ __all__ = [
     "get_review",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
