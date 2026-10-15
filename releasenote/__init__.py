@@ -33,8 +33,12 @@ from .qa import analyze_entries, analyze_entry, effective_vague_terms
 from .generator import render_markdown, render_qa_checklist
 from .diff import diff_drafts, compute_diff
 from .trend import compute_trend
+from .compare import compute_comparison
 from .exporters import (
     checklist_csv,
+    comparison_csv,
+    comparison_json,
+    comparison_matrix_csv,
     diff_csv,
     draft_json,
     qa_flags_csv,
@@ -46,6 +50,7 @@ from .exporters import (
 from .storage import DraftStore, ReviewStore
 from .service import (
     HistoryRequiredError,
+    build_comparison,
     build_trend,
     get_review,
     get_shared_draft,
@@ -85,6 +90,8 @@ __all__ = [
     "compute_diff",
     "compute_trend",
     "build_trend",
+    "compute_comparison",
+    "build_comparison",
     "qa_flags_csv",
     "checklist_csv",
     "diff_csv",
@@ -93,6 +100,9 @@ __all__ = [
     "trend_csv",
     "trend_json",
     "draft_json",
+    "comparison_csv",
+    "comparison_matrix_csv",
+    "comparison_json",
     "DraftStore",
     "ReviewStore",
     "record_review",
@@ -101,4 +111,4 @@ __all__ = [
     "HistoryRequiredError",
 ]
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"

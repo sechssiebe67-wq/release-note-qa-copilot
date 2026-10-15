@@ -45,7 +45,8 @@ The MVP is a dependency-free Python web application:
 | Workspace rules | Per-workspace JSON config: extra/allowed vague terms, banned phrases, required sections, severity overrides |
 | QA rule profiles | Named, reusable rule sets (`strict`, `marketing-safe`, `internal`) that bundle a `WorkspaceConfig` with a description; attach a profile to a draft and get an effective-rule summary |
 | Trend analysis | Analyse 2–20 ordered releases: per-release QA counts, publishability, sourced-entry ratio, vague/banned hits, consecutive deltas (`improving` / `stable` / `regressing`) and an overall verdict; render a table with SVG sparklines and export as CSV/JSON |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/trend/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend` |
+| Draft comparison | Compare 2–10 complete draft payloads: per-draft QA metrics, a per-entry presence matrix (`identical` / `changed` / `unique`), a shared/unique breakdown and a deterministic publishability recommendation; export as CSV/JSON |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
@@ -59,7 +60,11 @@ the review controls also offer a *Copy share link* button that copies the
 read-only `GET /s/<draft_id>` URL. A *Trend* section accepts one
 release per block, renders the per-release table, inline SVG sparklines for the
 total flag count and sourced ratio and a verdict badge per delta, and exposes
-*Download trend CSV* / *Download trend JSON* after a successful analysis.
+*Download trend CSV* / *Download trend JSON* after a successful analysis. A
+*Compare* section accepts 2–10 drafts (one per block, same shape as the trend
+input), renders the per-draft metrics, the entry presence matrix, the
+shared/unique breakdown and a recommendation badge, and exposes *Download
+comparison CSV* / *Download comparison JSON* / *Download matrix CSV*.
 
 ## Architecture
 
@@ -73,9 +78,10 @@ releasenote/
   qa.py         heuristic QA rules, workspace overrides and checklist
   diff.py       compare two drafts: classification, repeated claims, regressions
   trend.py      multi-release trend analysis: metrics, deltas, verdicts
+  compare.py    draft comparison matrix: metrics, presence, shared/unique, recommendation
   generator.py  Markdown rendering with inline QA annotations
-  exporters.py  CSV / JSON rendering of qa, checklist, diff, trend and full payload
-  service.py    parse -> group -> qa -> render pipeline (+ build_diff, reviews, shared drafts)
+  exporters.py  CSV / JSON rendering of qa, checklist, diff, trend, comparison and full payload
+  service.py    parse -> group -> qa -> render pipeline (+ build_diff, build_trend, build_comparison, reviews, shared drafts)
   storage.py    optional append-only draft history + review/audit store
   server.py     stdlib HTTP server + JSON API + read-only share pages
   static/       single-page browser UI (draft, diff, review controls, share link)
@@ -406,6 +412,83 @@ formats the trend cells the way Python does (`True`/`False`, integral floats as
 **v0.7.0** (Python package and Helm chart). No new third-party dependency is
 introduced; the standard library is still the only requirement.
 
+## Draft comparison matrix
+
+**Goal.** A reviewer who handles several drafts at once — a release train with
+two parallel branches, or a weekly digest plus a monthly rollup — otherwise has
+to open each draft individually, read its QA counts by eye and compare them
+mentally. The pairwise diff answers "what changed since the last release?" and
+the trend answers "is quality getting better?", but neither answers *"which of
+these N candidate drafts is the most publishable, and what is unique to each?"*.
+The comparison matrix answers that question directly, deterministically and
+entirely offline.
+
+**Input.** A list of **2–10** complete draft payloads, each
+`{"label": str, "content": str, "format": "auto"|"csv"|"json"}`, exactly like
+the trend input. Every `content` is parsed with `importer.parse_entries` and
+QA-checked with `qa.analyze_entries` under the resolved `config` / `profile`, so
+a draft scores exactly as it does through `POST /api/generate`.
+
+**Output.** A JSON-serialisable report:
+
+```json
+{
+  "drafts": [
+    {"label": "branch-a", "entry_count": 2,
+     "counts": {"high": 0, "medium": 1, "low": 0, "total": 1},
+     "publishable": true, "sourced_ratio": 1.0,
+     "vague_hits": 1, "banned_hits": 0}
+  ],
+  "matrix": [
+    {"key": "rel-1", "id": "REL-1", "title": "Bulk export", "type": "feature",
+     "presence": {"branch-a": "changed", "branch-b": "identical"}}
+  ],
+  "shared": ["rel-4"],
+  "unique": {"branch-a": ["rel-2"], "branch-b": ["rel-3"]},
+  "recommendation": {"label": "branch-b", "reason": "…"}
+}
+```
+
+Each `drafts` row reuses the trend table's metrics: `label`, `entry_count`,
+`counts` (high/medium/low/total), `publishable`, `sourced_ratio`, `vague_hits`
+and `banned_hits`. Every distinct entry — keyed by normalized `id` first, then
+normalized title — becomes one `matrix` row carrying the canonical `id`,
+`title`, `type` and a `presence` mapping `label → identical|changed|unique`:
+`identical` means the entry is byte-identical to the first draft that contained
+it, `changed` means it appears in that draft with different fields, and `unique`
+means it appears in exactly one draft. `shared` lists the keys present in every
+draft, and `unique` maps each label to the keys that appear only in that draft.
+
+**Recommendation rule (deterministic).** The recommended draft has the fewest
+`high` flags, then the fewest `total` flags, then the highest `sourced_ratio`,
+then the earliest input position — the same ordering rule the trend module uses.
+
+**Endpoints.**
+
+| Endpoint | Body / query | Response |
+| --- | --- | --- |
+| `POST /api/compare` | `{"drafts": [{"label", "content", "format"}], "profile", "config"}` | The full report plus the resolved `config` and `profile`. |
+| `GET /api/compare/sample` | — | A valid 2-draft example payload that `POST /api/compare` accepts. |
+| `GET /api/export/comparison.csv` | repeated `draft=label:content` (URL-encoded) + optional `profile` | `text/csv` with the header `label,entry_count,high,medium,low,total,publishable,sourced_ratio,vague_hits,banned_hits`, one row per draft. |
+| `GET /api/export/comparison-matrix.csv` | same as `comparison.csv` | `text/csv` with the header `key,id,title,type,<label1>,<label2>,…` — one column per draft label in input order, one row per matrix entry, cells `identical` / `changed` / `unique` / empty. |
+| `GET /api/export/comparison.json` | same as `comparison.csv` | The full report as JSON (stable key order, UTF-8, no `NaN`). |
+
+All three exports answer with a `Content-Disposition: attachment` header. The
+endpoints reuse the existing 2 MiB body cap, JSON-object validation and query
+contract: HTTP 400 for bad input (including 0, 1 or 11 drafts, a missing
+`content`, a non-object draft and an unknown profile), and HTTP 422 for
+unparseable content.
+
+**Browser UI.** The *Compare* section accepts one draft per block (a label line
+then its CSV/JSON content, blocks separated by a blank line, mirroring the
+*Trend* input), posts it to `POST /api/compare`, and renders a per-draft metrics
+table, the entry presence matrix, the shared/unique breakdown, a recommendation
+badge and the *Download comparison CSV* / *Download comparison JSON* /
+*Download matrix CSV* buttons — all built in the browser from the returned
+payload. The feature ships in **v0.9.0** (Python package and Helm chart). No new
+third-party dependency is introduced; the standard library is still the only
+requirement.
+
 ## Share links
 
 **Goal.** Release Note QA Copilot exists to turn raw changelog and ticket
@@ -497,6 +580,9 @@ Multi-release trend analysis with sparklines and trend export landed in
 [Multi-release trend analysis](#multi-release-trend-analysis).
 Read-only draft share links for reviewer hand-off landed in **v0.8.0** — see
 [Share links](#share-links).
+The draft comparison matrix with per-entry presence and a publishability
+recommendation landed in **v0.9.0** — see
+[Draft comparison matrix](#draft-comparison-matrix).
 
 ## Success signals
 

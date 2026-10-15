@@ -269,6 +269,29 @@
       </div>
     </section>
 
+    <section style="grid-column: 1 / -1;" id="compareSection">
+      <label>Compare drafts</label>
+      <p class="muted">Enter 2–10 candidate drafts. Each block is a label line followed by that draft's CSV / JSON content; separate blocks with a blank line. Uses the selected QA rule profile and workspace rules above.</p>
+      <label for="compareContent">Drafts</label>
+      <textarea id="compareContent" class="small" spellcheck="false" placeholder="branch-a&#10;id,type,title,description,benefit,source&#10;REL-1,feature,Bulk export,Export all reports in one click,Saves time,REL-1&#10;&#10;branch-b&#10;id,type,title,description,benefit,source&#10;REL-1,feature,Bulk export,Export all reports in one click,One-click export saves time,REL-1"></textarea>
+      <div class="row" style="margin-top:.4rem">
+        <button id="runCompare" type="button">Compare drafts</button>
+        <button id="loadCompareSample" class="secondary" type="button">Load compare sample</button>
+      </div>
+      <div class="status" id="compareStatus"></div>
+      <div id="compareResults" hidden>
+        <div class="summary" id="compareSummary"></div>
+        <div id="compareTable"></div>
+        <div id="compareMatrix"></div>
+        <div class="summary" id="compareUnique"></div>
+        <div class="row" style="margin-top:.6rem" id="compareExports">
+          <button id="downloadComparisonCsv" class="secondary" type="button">Download comparison CSV</button>
+          <button id="downloadComparisonJson" class="secondary" type="button">Download comparison JSON</button>
+          <button id="downloadComparisonMatrixCsv" class="secondary" type="button">Download matrix CSV</button>
+        </div>
+      </div>
+    </section>
+
     <section style="grid-column: 1 / -1;" id="reviewHint" hidden>
       <label>Review</label>
       <p class="muted">Approve, reject or reset a draft and keep an audit trail. Set <code>DATA_DIR</code> when starting the server so drafts get an id and reviews are persisted durably.</p>
@@ -329,6 +352,7 @@
     let lastDraftId = null;
     let profilesByName = {};
     let lastTrend = null;
+    let lastComparison = null;
 
     async function api(path, options) {
       const res = await fetch(path, options);
@@ -868,6 +892,140 @@
       saveBlob("release-trend.json", buildTrendJson(lastTrend), "application/json");
     }
 
+    function renderComparison(report) {
+      const drafts = report.drafts || [];
+      const matrix = report.matrix || [];
+      const unique = report.unique || {};
+      const recommendation = report.recommendation || {};
+      $("compareSummary").innerHTML =
+        '<span class="pill pass">recommended: ' + esc(recommendation.label) + '</span>' +
+        '<span class="pill">' + esc(drafts.length) + ' drafts</span>' +
+        '<span class="pill">' + esc((report.shared || []).length) + ' shared entries</span>' +
+        '<span class="muted">' + esc(recommendation.reason) + '</span>';
+
+      const header = "<tr><th>Draft</th><th>Entries</th><th>High</th><th>Med</th><th>Low</th><th>Total</th><th>Publishable</th><th>Sourced</th><th>Vague</th><th>Banned</th></tr>";
+      const rows = drafts.map(d =>
+        "<tr>" +
+          "<td>" + esc(d.label) + "</td>" +
+          "<td>" + esc(d.entry_count) + "</td>" +
+          "<td>" + esc(d.counts.high) + "</td>" +
+          "<td>" + esc(d.counts.medium) + "</td>" +
+          "<td>" + esc(d.counts.low) + "</td>" +
+          "<td>" + esc(d.counts.total) + "</td>" +
+          '<td><span class="pill ' + (d.publishable ? "pass" : "high") + '">' + (d.publishable ? "yes" : "no") + '</span></td>' +
+          "<td>" + esc(Math.round(d.sourced_ratio * 100) + "%") + "</td>" +
+          "<td>" + esc(d.vague_hits) + "</td>" +
+          "<td>" + esc(d.banned_hits) + "</td>" +
+        "</tr>"
+      ).join("");
+      $("compareTable").innerHTML =
+        '<table class="trend"><thead>' + header + '</thead><tbody>' + rows + '</tbody></table>';
+
+      const matrixHeader = "<tr><th>Entry</th>" +
+        drafts.map(d => "<th>" + esc(d.label) + "</th>").join("") + "</tr>";
+      const matrixRows = matrix.map(row => {
+        const presence = row.presence || {};
+        return "<tr>" +
+          "<td>" + esc(row.title || row.id || row.key) + ' <span class="muted">' + esc(row.id || row.key) + '</span></td>' +
+          drafts.map(d => "<td>" + esc(presence[d.label] || "") + "</td>").join("") +
+        "</tr>";
+      }).join("");
+      $("compareMatrix").innerHTML =
+        '<label style="margin-top:.6rem">Entry matrix</label>' +
+        '<table class="trend"><thead>' + matrixHeader + '</thead><tbody>' + matrixRows + '</tbody></table>';
+
+      const uniquePills = Object.keys(unique).map(label =>
+        '<span class="pill">' + esc(label) + ' unique: ' + esc((unique[label] || []).length) + '</span>'
+      ).join("");
+      $("compareUnique").innerHTML = uniquePills;
+    }
+
+    async function loadCompareSample() {
+      try {
+        const data = await api("/api/compare/sample");
+        $("compareContent").value = (data.drafts || []).map(d =>
+          d.label + "\n" + d.content
+        ).join("\n\n");
+        $("compareStatus").textContent = "Compare sample loaded.";
+      } catch (err) {
+        $("compareStatus").textContent = "Error: " + err.message;
+      }
+    }
+
+    async function runCompare() {
+      const drafts = parseTrendInput($("compareContent").value);
+      if (drafts.length < 2) {
+        $("compareStatus").textContent = "Enter at least 2 draft blocks separated by a blank line.";
+        return;
+      }
+      $("runCompare").disabled = true;
+      $("compareStatus").textContent = "Comparing drafts…";
+      const body = { drafts: drafts };
+      const config = collectConfig();
+      if (Object.keys(config).length) body.config = config;
+      const profile = $("profile").value;
+      if (profile) body.profile = profile;
+      try {
+        const report = await api("/api/compare", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        lastComparison = report;
+        renderComparison(report);
+        $("compareResults").hidden = false;
+        $("compareStatus").textContent = "Comparison ready.";
+      } catch (err) {
+        lastComparison = null;
+        $("compareResults").hidden = true;
+        $("compareStatus").textContent = "Error: " + err.message;
+      } finally {
+        $("runCompare").disabled = false;
+      }
+    }
+
+    function buildComparisonCsv(report) {
+      const header = ["label", "entry_count", "high", "medium", "low", "total",
+        "publishable", "sourced_ratio", "vague_hits", "banned_hits"];
+      const rows = (report.drafts || []).map(d =>
+        [d.label, d.entry_count, d.counts.high, d.counts.medium, d.counts.low,
+         d.counts.total, pyBool(d.publishable), pyFloat(d.sourced_ratio),
+         d.vague_hits, d.banned_hits]
+      );
+      return buildCsv(header, rows);
+    }
+
+    function buildComparisonMatrixCsv(report) {
+      const labels = (report.drafts || []).map(d => d.label);
+      const header = ["key", "id", "title", "type"].concat(labels);
+      const rows = (report.matrix || []).map(row => {
+        const presence = row.presence || {};
+        return [row.key, row.id, row.title, row.type].concat(
+          labels.map(label => presence[label] || "")
+        );
+      });
+      return buildCsv(header, rows);
+    }
+
+    function buildComparisonJson(report) {
+      return stableJson(report, null);
+    }
+
+    function downloadComparisonCsv() {
+      if (!lastComparison) return;
+      saveBlob("draft-comparison.csv", buildComparisonCsv(lastComparison), "text/csv");
+    }
+
+    function downloadComparisonJson() {
+      if (!lastComparison) return;
+      saveBlob("draft-comparison.json", buildComparisonJson(lastComparison), "application/json");
+    }
+
+    function downloadComparisonMatrixCsv() {
+      if (!lastComparison) return;
+      saveBlob("draft-comparison-matrix.csv", buildComparisonMatrixCsv(lastComparison), "text/csv");
+    }
+
     function download() {
       if (!lastMarkdown) { $("status").textContent = "Generate a draft first."; return; }
       const blob = new Blob([lastMarkdown], { type: "text/markdown" });
@@ -993,6 +1151,11 @@
     $("loadTrendSample").addEventListener("click", loadTrendSample);
     $("downloadTrendCsv").addEventListener("click", downloadTrendCsv);
     $("downloadTrendJson").addEventListener("click", downloadTrendJson);
+    $("runCompare").addEventListener("click", runCompare);
+    $("loadCompareSample").addEventListener("click", loadCompareSample);
+    $("downloadComparisonCsv").addEventListener("click", downloadComparisonCsv);
+    $("downloadComparisonJson").addEventListener("click", downloadComparisonJson);
+    $("downloadComparisonMatrixCsv").addEventListener("click", downloadComparisonMatrixCsv);
     $("profile").addEventListener("change", () => {
       const name = $("profile").value;
       if (!name) {
