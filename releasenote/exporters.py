@@ -43,6 +43,20 @@ TREND_HEADER = (
 COMPARISON_HEADER = TREND_HEADER
 COMPARISON_MATRIX_HEADER = ("key", "id", "title", "type")
 
+# The profile comparison table repeats the same metrics keyed by profile name.
+PROFILE_COMPARISON_HEADER = (
+    "profile",
+    "entry_count",
+    "high",
+    "medium",
+    "low",
+    "total",
+    "publishable",
+    "sourced_ratio",
+    "vague_hits",
+    "banned_hits",
+)
+
 # Canonical order of the diff categories, matching the server payload.
 DIFF_CATEGORIES = (
     "added",
@@ -349,6 +363,44 @@ def comparison_json(report: Mapping[str, Any]) -> str:
     )
 
 
+def profile_comparison_csv(report: Mapping[str, Any]) -> str:
+    """Return one CSV row per profile: the documented profile-comparison header.
+
+    Header: ``profile,entry_count,high,medium,low,total,publishable,
+    sourced_ratio,vague_hits,banned_hits``. A report without a ``profiles``
+    list yields just the header row, so the shape is always stable.
+    """
+    rows = []
+    for item in _as_list(_as_mapping(report).get("profiles")):
+        profile = _as_mapping(item)
+        counts = _as_mapping(profile.get("counts"))
+        rows.append(
+            (
+                profile.get("name", ""),
+                profile.get("entry_count", 0),
+                counts.get("high", 0),
+                counts.get("medium", 0),
+                counts.get("low", 0),
+                counts.get("total", 0),
+                profile.get("publishable", False),
+                profile.get("sourced_ratio", 0.0),
+                profile.get("vague_hits", 0),
+                profile.get("banned_hits", 0),
+            )
+        )
+    return _render_csv(PROFILE_COMPARISON_HEADER, rows)
+
+
+def profile_comparison_json(report: Mapping[str, Any]) -> str:
+    """Serialise a profile comparison report as stable, UTF-8 JSON without NaN."""
+    return json.dumps(
+        report,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
 __all__ = [
     "QA_FLAG_HEADER",
     "CHECKLIST_HEADER",
@@ -358,6 +410,7 @@ __all__ = [
     "TREND_HEADER",
     "COMPARISON_HEADER",
     "COMPARISON_MATRIX_HEADER",
+    "PROFILE_COMPARISON_HEADER",
     "DIFF_CATEGORIES",
     "qa_flags_csv",
     "checklist_csv",
@@ -372,4 +425,6 @@ __all__ = [
     "comparison_csv",
     "comparison_matrix_csv",
     "comparison_json",
+    "profile_comparison_csv",
+    "profile_comparison_json",
 ]
