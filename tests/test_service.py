@@ -2,7 +2,12 @@ import unittest
 
 from releasenote.config import WorkspaceConfig, sample_config
 from releasenote.importer import ParseError
-from releasenote.service import build_draft, sample, sample_workspace_config
+from releasenote.service import (
+    build_diff,
+    build_draft,
+    sample,
+    sample_workspace_config,
+)
 
 
 class BuildDraftTests(unittest.TestCase):
@@ -116,6 +121,78 @@ class WorkspaceConfigServiceTests(unittest.TestCase):
         config = WorkspaceConfig.from_dict(payload)
         self.assertEqual(payload, config.to_dict())
         self.assertEqual(payload, sample_config())
+
+
+class BuildDiffTests(unittest.TestCase):
+    PREVIOUS = (
+        "id,type,title,description,benefit,source,link\n"
+        "A,feature,Alpha,Alpha does things,Fast and reliable,SRC-A,https://a\n"
+        "B,fix,Beta,Beta description,Gamma value,SRC-B,\n"
+    )
+
+    def test_build_diff_returns_standard_payload_and_diff(self):
+        current = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Reliable and fast,,\n"
+            "C,feature,Gamma,A new feature,New value,SRC-C,\n"
+        )
+        result = build_diff(self.PREVIOUS, current, "csv", "Release 4")
+        for key in ("markdown", "qa", "checklist", "config", "diff"):
+            self.assertIn(key, result)
+        self.assertEqual(result["title"], "Release 4")
+        self.assertEqual(result["entry_count"], 2)
+        self.assertEqual(
+            set(result["diff"]),
+            {
+                "added",
+                "changed",
+                "removed",
+                "unchanged",
+                "repeated_claims",
+                "regressions",
+            },
+        )
+
+    def test_build_diff_merges_new_flags(self):
+        current = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Reliable and fast,,\n"
+            "B,fix,Beta,Beta description,Gamma value,SRC-B,\n"
+        )
+        result = build_diff(self.PREVIOUS, current, "csv")
+        codes = {f["code"] for f in result["qa"]["flags"]}
+        self.assertIn("regression_unsourced", codes)
+        self.assertIn("repeated_claim", codes)
+        self.assertFalse(result["qa"]["publishable"])
+
+    def test_build_diff_honours_severity_override(self):
+        current = (
+            "id,type,title,description,benefit,source,link\n"
+            "A,feature,Alpha,Alpha does things,Reliable and fast,,\n"
+            "B,fix,Beta,Beta description,Gamma value,SRC-B,\n"
+        )
+        result = build_diff(
+            self.PREVIOUS,
+            current,
+            "csv",
+            config={"severity_overrides": {"regression_unsourced": "low"}},
+        )
+        flag = next(
+            f
+            for f in result["qa"]["flags"]
+            if f["code"] == "regression_unsourced"
+        )
+        self.assertEqual(flag["severity"], "low")
+
+    def test_build_diff_rejects_invalid_config(self):
+        with self.assertRaises(ValueError):
+            build_diff(
+                self.PREVIOUS, self.PREVIOUS, "csv", config={"nope": []}
+            )
+
+    def test_build_draft_has_no_diff_key(self):
+        result = build_draft(sample("csv")["content"], "csv")
+        self.assertNotIn("diff", result)
 
 
 class SampleTests(unittest.TestCase):

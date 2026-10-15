@@ -33,6 +33,10 @@ UNTRUSTED = (
     "f.severity",
     "item.detail",
     "item.label",
+    "item.title",
+    "item.reason",
+    "item.type",
+    "item.id",
     "d.title",
     # Workspace config values echoed back by /api/generate.
     "config.extra_vague_terms",

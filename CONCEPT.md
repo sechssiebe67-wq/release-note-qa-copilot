@@ -36,10 +36,11 @@ The MVP is a dependency-free Python web application:
 | Traceability | Source/link rendered next to every entry |
 | QA | Flags missing source, vague language, unsupported quantified claims, missing benefit, undocumented breaking changes |
 | Checklist | Five pass/warn/fail checks plus a publishability verdict |
+| Diff | Compare two drafts: added / changed / removed / unchanged entries, repeated claims and regressions |
 | Export | Markdown download; JSON API for automation |
 | History | Optional file-backed store of generated drafts (`DATA_DIR`) |
 | Workspace rules | Per-workspace JSON config: extra/allowed vague terms, banned phrases, required sections, severity overrides |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/history`, `POST /api/generate` |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/history`, `POST /api/generate`, `POST /api/diff` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown.
@@ -53,8 +54,9 @@ releasenote/
   importer.py   CSV/JSON parsing + header aliasing
   grouping.py   bucketing by change type
   qa.py         heuristic QA rules, workspace overrides and checklist
+  diff.py       compare two drafts: classification, repeated claims, regressions
   generator.py  Markdown rendering with inline QA annotations
-  service.py    parse -> group -> qa -> render pipeline
+  service.py    parse -> group -> qa -> render pipeline (+ build_diff)
   storage.py    optional append-only draft history
   server.py     stdlib HTTP server + JSON API
   static/       single-page browser UI
@@ -88,6 +90,16 @@ Workspace rules add two more flags when configured:
 - **missing_required_section** (medium): a canonical group listed in
   `required_sections` has no entries (a draft-level flag with an empty
   `entry_id`).
+
+The release diff adds three more flags on the *current* draft when it is
+compared with a previous release:
+
+- **regression_unsourced** (high): an entry that previously carried a source or
+  link no longer has one.
+- **regression_vague_benefit** (medium): a previously non-vague benefit now
+  contains a vague term.
+- **repeated_claim** (medium): identical normalized benefit text is reused, or
+  an entry's title and description are unchanged from the previous release.
 
 A draft is **publishable** once no high-severity flag remains. Any flag code can
 be re-ranked to `high`/`medium`/`low` through `severity_overrides`.
@@ -139,6 +151,29 @@ This works with the existing traceability model: the response echoes the
 *effective* config under `config`, so reviewers can see which rules produced
 each flag. The feature ships in **v0.2.0** (Python package and Helm chart).
 
+## Release diff
+
+Publishing a release note is not only about the current draft: reviewers also
+need to know what changed since the last one and whether a claim got worse.
+`POST /api/diff` (and `releasenote.diff.diff_drafts`) compare a **previous**
+draft with the **current** one, entirely offline:
+
+- every current entry is classified as `added`, `changed` or `unchanged`, by
+  matching on `id` first and then on the normalized title;
+- previous entries with no counterpart are listed as `removed`;
+- `repeated_claims` collects entries whose normalized benefit text is reused
+  or whose title and description are identical to the previous release;
+- `regressions` collects entries that lost their source/link, whose benefit
+  turned vague, or that were publishable before but now carry a high-severity
+  flag.
+
+The result is a JSON-serialisable object keyed by those six lists, where every
+item carries per-entry `id`, `title`, `type` and a human-readable `reason`. The
+new QA flags are merged into the current draft's `qa` result and honour
+`severity_overrides`, so a workspace that re-ranks `regression_unsourced` sees
+the overridden severity in the response. The feature ships in **v0.3.0**
+(Python package and Helm chart).
+
 ## Deployment contract
 
 - Docker image builds for `linux/amd64` and `linux/arm64`, serves HTTP on port
@@ -157,13 +192,14 @@ each flag. The feature ships in **v0.2.0** (Python package and Helm chart).
 
 - Confluence / GitHub Releases / e-mail publish integrations behind a review
   gate.
-- Diff two releases to highlight regressions and repeated claims.
 - Multi-user roles (author / QA reviewer / approver) and audit log.
 - Optional LLM assistance for benefit wording that still cites a source.
 - Persist workspace rules server-side and version them alongside drafts.
 
 Per-workspace term and tone rules (was the first item in this list) landed in
 **v0.2.0** — see [Workspace configuration](#workspace-configuration).
+Diffing two releases to highlight regressions and repeated claims (was the
+second item) landed in **v0.3.0** — see [Release diff](#release-diff).
 
 ## Success signals
 

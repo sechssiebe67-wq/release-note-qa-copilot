@@ -16,10 +16,11 @@ from urllib.parse import parse_qs, urlparse
 from . import __version__
 from .config import WorkspaceConfig
 from .importer import ParseError
-from .service import build_draft, sample, sample_workspace_config
+from .service import build_diff, build_draft, sample, sample_workspace_config
 from .storage import DraftStore
 
 MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MiB upload cap.
+MAX_DRAIN_BYTES = 8 * 1024 * 1024  # Bounded read of an over-limit body.
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
@@ -64,8 +65,23 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0:
             return b""
         if length > MAX_BODY_BYTES:
+            self._drain_body(length)
             raise ParseError("Request body exceeds 2 MiB limit")
         return self.rfile.read(length)
+
+    def _drain_body(self, length: int) -> None:
+        """Read up to a bounded amount of an over-limit body.
+
+        Draining lets the client finish writing before the 413 response is
+        sent, which avoids a connection reset while still refusing to buffer
+        arbitrarily large payloads.
+        """
+        remaining = min(length, MAX_DRAIN_BYTES)
+        while remaining > 0:
+            chunk = self.rfile.read(min(65536, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
         sys.stderr.write(
@@ -121,24 +137,73 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
 
-    def do_POST(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
-        if path != "/api/generate":
-            self._send_json(404, {"error": "not found", "path": parsed.path})
+    def _store(self, result: Dict[str, Any]) -> None:
+        """Persist a generated draft when history is enabled."""
+        store = getattr(self.server, "store", None)
+        if store is None:
             return
+        record = store.save(
+            result["title"],
+            result["markdown"],
+            result["entry_count"],
+            result["qa"]["counts"]["high"],
+        )
+        result["draft_id"] = record["id"]
+
+    def _parse_body(self) -> Optional[Dict[str, Any]]:
+        """Read and JSON-decode the request body, replying on error.
+
+        Returns the payload mapping or ``None`` when a response was already
+        sent for an invalid, oversized or non-object body.
+        """
         try:
             raw = self._read_body()
             payload = json.loads(raw.decode("utf-8")) if raw else {}
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._send_json(400, {"error": "body must be valid JSON"})
-            return
+            return None
         except ParseError as exc:
             self._send_json(413, {"error": str(exc)})
-            return
+            return None
         if not isinstance(payload, dict):
             self._send_json(400, {"error": "body must be a JSON object"})
+            return None
+        return payload
+
+    def _parse_config(
+        self, payload: Dict[str, Any]
+    ) -> Optional[WorkspaceConfig]:
+        """Validate the optional ``config`` field, replying on error."""
+        config_payload = payload.get("config")
+        if config_payload is not None and not isinstance(config_payload, dict):
+            self._send_json(400, {"error": "'config' must be a JSON object"})
+            return None
+        try:
+            return WorkspaceConfig.from_dict(config_payload)
+        except ValueError as exc:
+            self._send_json(400, {"error": "invalid config: {}".format(exc)})
+            return None
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        if path not in ("/api/generate", "/api/diff"):
+            self._send_json(404, {"error": "not found", "path": parsed.path})
             return
+        payload = self._parse_body()
+        if payload is None:
+            return
+        workspace = self._parse_config(payload)
+        if workspace is None:
+            return
+        if path == "/api/generate":
+            self._post_generate(payload, workspace)
+        else:
+            self._post_diff(payload, workspace)
+
+    def _post_generate(
+        self, payload: Dict[str, Any], workspace: WorkspaceConfig
+    ) -> None:
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             self._send_json(400, {"error": "field 'content' is required"})
@@ -148,15 +213,6 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(fmt, str) or not isinstance(title, str):
             self._send_json(400, {"error": "'format' and 'title' must be strings"})
             return
-        config_payload = payload.get("config")
-        if config_payload is not None and not isinstance(config_payload, dict):
-            self._send_json(400, {"error": "'config' must be a JSON object"})
-            return
-        try:
-            workspace = WorkspaceConfig.from_dict(config_payload)
-        except ValueError as exc:
-            self._send_json(400, {"error": "invalid config: {}".format(exc)})
-            return
         try:
             result = build_draft(content, fmt, title, workspace)
         except ParseError as exc:
@@ -165,15 +221,34 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_json(400, {"error": "invalid config: {}".format(exc)})
             return
-        store = getattr(self.server, "store", None)
-        if store is not None:
-            record = store.save(
-                result["title"],
-                result["markdown"],
-                result["entry_count"],
-                result["qa"]["counts"]["high"],
-            )
-            result["draft_id"] = record["id"]
+        self._store(result)
+        self._send_json(200, result)
+
+    def _post_diff(
+        self, payload: Dict[str, Any], workspace: WorkspaceConfig
+    ) -> None:
+        previous = payload.get("previous")
+        if not isinstance(previous, str) or not previous.strip():
+            self._send_json(400, {"error": "field 'previous' is required"})
+            return
+        current = payload.get("current")
+        if not isinstance(current, str) or not current.strip():
+            self._send_json(400, {"error": "field 'current' is required"})
+            return
+        fmt = payload.get("format", "auto")
+        title = payload.get("title", "Release Notes")
+        if not isinstance(fmt, str) or not isinstance(title, str):
+            self._send_json(400, {"error": "'format' and 'title' must be strings"})
+            return
+        try:
+            result = build_diff(previous, current, fmt, title, workspace)
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": "invalid config: {}".format(exc)})
+            return
+        self._store(result)
         self._send_json(200, result)
 
 

@@ -90,6 +90,7 @@
     .flag.high { border-left: 3px solid var(--high); }
     .flag.medium { border-left: 3px solid var(--medium); }
     .flag.low { border-left: 3px solid var(--muted); }
+    .flag.pass { border-left: 3px solid var(--pass); }
     pre {
       background: #0b1220;
       border: 1px solid var(--border);
@@ -205,6 +206,16 @@
           <button id="loadRules" class="secondary" type="button">Load rule sample</button>
         </div>
       </details>
+
+      <details id="diffPanel">
+        <summary>Compare to previous release</summary>
+        <p class="muted">Paste the previous release's CSV / JSON to see what changed, what was repeated and where a claim regressed. The current data above is used as the new release.</p>
+        <label for="previous">Previous release data</label>
+        <textarea id="previous" class="small" spellcheck="false" placeholder="id,type,title,description,benefit,source,link&#10;REL-1,feature,Bulk export,Export all reports,Cuts weekly effort,REL-1,https://..."></textarea>
+        <div class="row" style="margin-top:.4rem">
+          <button id="runDiff" class="secondary" type="button">Diff current vs previous</button>
+        </div>
+      </details>
       <div class="status" id="status"></div>
     </section>
 
@@ -213,6 +224,11 @@
       <div class="summary" id="configSummary"></div>
       <ul class="checklist" id="checklist"></ul>
       <div id="entries"></div>
+    </section>
+
+    <section style="grid-column: 1 / -1;">
+      <label>Release diff</label>
+      <div id="diff" class="muted">Run a diff to compare the current draft with the previous release.</div>
     </section>
 
     <section style="grid-column: 1 / -1;">
@@ -261,6 +277,32 @@
       return flags.map(f =>
         '<div class="flag ' + esc(f.severity) + '"><strong>' + esc(f.code) + '</strong> — ' + esc(f.message) + '</div>'
       ).join("");
+    }
+
+    function renderDiffItem(item, severity) {
+      return '<div class="flag ' + esc(severity) + '">' +
+        '<strong>' + esc(item.title || "(untitled)") + '</strong> ' +
+        '<span class="muted">' + esc(item.type) + ' · <code>' + esc(item.id) + '</code></span>' +
+        '<div>' + esc(item.reason) + '</div>' +
+      '</div>';
+    }
+
+    function renderDiff(diff) {
+      if (!diff) return '<div class="muted">Run a diff to compare the current draft with the previous release.</div>';
+      const sections = [
+        ["Added", diff.added, "pass"],
+        ["Changed", diff.changed, "low"],
+        ["Removed", diff.removed, "medium"],
+        ["Unchanged", diff.unchanged, "low"],
+        ["Repeated claims", diff.repeated_claims, "medium"],
+        ["Regressions", diff.regressions, "high"]
+      ];
+      const html = sections.map(([label, items, severity]) => {
+        if (!items || !items.length) return "";
+        return '<h3>' + esc(label) + ' (' + esc(items.length) + ')</h3>' +
+          items.map(item => renderDiffItem(item, severity)).join("");
+      }).join("");
+      return html || '<div class="muted">No differences between the two drafts.</div>';
     }
 
     function renderConfig(config) {
@@ -353,6 +395,8 @@
         '</div>';
       }).join("");
 
+      $("diff").innerHTML = renderDiff(result.diff);
+
       lastMarkdown = result.markdown;
       $("markdown").textContent = result.markdown;
     }
@@ -385,6 +429,40 @@
       }
     }
 
+    async function runDiff() {
+      const current = $("content").value;
+      const previous = $("previous").value;
+      if (!current.trim() || !previous.trim()) {
+        $("status").textContent = "Paste both the current and previous data first.";
+        return;
+      }
+      $("runDiff").disabled = true;
+      $("status").textContent = "Comparing releases…";
+      const body = {
+        previous: previous,
+        current: current,
+        format: $("format").value,
+        title: $("title").value
+      };
+      const config = collectConfig();
+      if (Object.keys(config).length) body.config = config;
+      try {
+        const result = await api("/api/diff", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        renderResult(result);
+        $("diffPanel").open = true;
+        $("status").textContent = "Diff generated.";
+        loadHistory();
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      } finally {
+        $("runDiff").disabled = false;
+      }
+    }
+
     function download() {
       if (!lastMarkdown) { $("status").textContent = "Generate a draft first."; return; }
       const blob = new Blob([lastMarkdown], { type: "text/markdown" });
@@ -411,6 +489,7 @@
     }
 
     $("generate").addEventListener("click", generate);
+    $("runDiff").addEventListener("click", runDiff);
     $("loadCsv").addEventListener("click", () => loadSample("csv"));
     $("loadJson").addEventListener("click", () => loadSample("json"));
     $("loadRules").addEventListener("click", loadRules);
