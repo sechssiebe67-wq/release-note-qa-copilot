@@ -1,13 +1,19 @@
+import tempfile
 import unittest
+from unittest import mock
 
 from releasenote.config import WorkspaceConfig, sample_config
 from releasenote.importer import ParseError
+from releasenote.models import Flag, QAResult
 from releasenote.service import (
+    HistoryRequiredError,
     build_diff,
     build_draft,
+    get_shared_draft,
     sample,
     sample_workspace_config,
 )
+from releasenote.storage import DraftStore, ReviewStore
 
 
 class BuildDraftTests(unittest.TestCase):
@@ -193,6 +199,98 @@ class BuildDiffTests(unittest.TestCase):
     def test_build_draft_has_no_diff_key(self):
         result = build_draft(sample("csv")["content"], "csv")
         self.assertNotIn("diff", result)
+
+
+class GetSharedDraftTests(unittest.TestCase):
+    VAGUE = (
+        "id,type,title,description,benefit,source\n"
+        "A,fix,Better sync,The sync is improved,"
+        "A much better experience,A\n"
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = DraftStore(self.tmp.name)
+        self.review_store = ReviewStore(self.tmp.name, self.store)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _save(self, content=None, config=None):
+        result = build_draft(content or sample("csv")["content"], "csv",
+                             config=config)
+        record = self.store.save(
+            result["title"],
+            result["markdown"],
+            result["entry_count"],
+            result["qa"]["counts"]["high"],
+            entries=result["entries"],
+            config=result["config"],
+        )
+        return result, record["id"]
+
+    def test_payload_shape(self):
+        _result, draft_id = self._save()
+        payload = get_shared_draft(draft_id, self.store, self.review_store)
+        for key in (
+            "draft_id",
+            "title",
+            "markdown",
+            "qa",
+            "checklist",
+            "rules",
+            "review",
+            "created_at",
+        ):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["draft_id"], draft_id)
+        self.assertIn("publishable", payload["qa"])
+        self.assertIn("counts", payload["qa"])
+        self.assertIn("flag_counts", payload["rules"])
+        self.assertEqual(payload["review"]["status"], "pending")
+
+    def test_markdown_and_title_match_stored_draft(self):
+        result, draft_id = self._save()
+        payload = get_shared_draft(draft_id, self.store)
+        self.assertEqual(payload["title"], result["title"])
+        self.assertEqual(payload["markdown"], result["markdown"])
+
+    def test_qa_is_recomputed_not_read_from_record(self):
+        _result, draft_id = self._save()
+        marker = QAResult(flags=[Flag("marker", "high", "recomputed", "A")])
+        with mock.patch("releasenote.service.analyze_entries", return_value=marker):
+            payload = get_shared_draft(draft_id, self.store)
+        self.assertEqual(payload["qa"]["counts"]["high"], 1)
+        self.assertEqual(payload["qa"]["flags"][0]["code"], "marker")
+
+    def test_uses_stored_config_for_rules(self):
+        _result, draft_id = self._save(
+            content=self.VAGUE,
+            config={"severity_overrides": {"vague_language": "high"}},
+        )
+        payload = get_shared_draft(draft_id, self.store)
+        vague = [f for f in payload["qa"]["flags"] if f["code"] == "vague_language"]
+        self.assertTrue(vague)
+        self.assertEqual(vague[0]["severity"], "high")
+        self.assertEqual(
+            payload["rules"]["severity_overrides"], {"vague_language": "high"}
+        )
+
+    def test_review_is_merged(self):
+        _result, draft_id = self._save()
+        self.review_store.record(draft_id, "approved", "Ada", "Ship it")
+        payload = get_shared_draft(draft_id, self.store, self.review_store)
+        self.assertEqual(payload["review"]["status"], "approved")
+        self.assertEqual(payload["review"]["reviewer"], "Ada")
+        self.assertEqual(payload["review"]["comment"], "Ship it")
+
+    def test_unknown_id_raises_lookup_error(self):
+        with self.assertRaises(LookupError):
+            get_shared_draft("does-not-exist", self.store)
+
+    def test_history_required_when_store_missing(self):
+        with self.assertRaises(HistoryRequiredError):
+            get_shared_draft("anything", None)
 
 
 class SampleTests(unittest.TestCase):

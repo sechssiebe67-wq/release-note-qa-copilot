@@ -12,6 +12,7 @@ from .importer import parse_entries, sample_csv, sample_json
 from .models import (
     REVIEW_PENDING,
     REVIEW_STATUSES,
+    TYPE_OTHER,
     ChangeEntry,
     QAResult,
     ReviewRecord,
@@ -26,6 +27,28 @@ from .storage import ReviewStore
 from .trend import compute_trend
 
 ConfigInput = Optional[Union[WorkspaceConfig, Dict[str, Any]]]
+
+
+class HistoryRequiredError(RuntimeError):
+    """Raised when a share link is requested but ``DATA_DIR`` is unset.
+
+    Share links read a stored draft, so they are only available when the
+    file-backed history store is enabled. The server maps this to HTTP 400.
+    """
+
+
+def _entry_from_dict(data: Dict[str, Any]) -> ChangeEntry:
+    """Reconstruct a :class:`ChangeEntry` from a stored entry mapping."""
+    return ChangeEntry(
+        id=str(data.get("id") or ""),
+        type=str(data.get("type") or TYPE_OTHER),
+        title=str(data.get("title") or ""),
+        description=str(data.get("description") or ""),
+        benefit=str(data.get("benefit") or ""),
+        source=str(data.get("source") or ""),
+        link=str(data.get("link") or ""),
+        audience=str(data.get("audience") or ""),
+    )
 
 
 def _coerce_config(config: ConfigInput) -> WorkspaceConfig:
@@ -279,3 +302,70 @@ def get_review(
     payload["draft_id"] = payload.pop("id")
     payload["audit"] = store.audit(draft_id)
     return payload
+
+
+def get_shared_draft(
+    draft_id: str,
+    store: Optional[Any] = None,
+    review_store: Optional[ReviewStore] = None,
+) -> Dict[str, Any]:
+    """Return a read-only, JSON-serialisable view of a stored draft.
+
+    The stored entries are re-analysed with the **current** heuristics and the
+    workspace config that produced the draft, so editing
+    :mod:`releasenote.qa` changes the share output without regenerating the
+    draft. The current review status is merged in. The payload has the keys
+    ``draft_id``, ``title``, ``markdown``, ``qa``, ``checklist``, ``rules``,
+    ``review`` and ``created_at``.
+
+    Raises :class:`HistoryRequiredError` when no history store is available
+    (``DATA_DIR`` unset) and :class:`LookupError` for an unknown draft id.
+    """
+    if store is None:
+        raise HistoryRequiredError(
+            "share links require history; set DATA_DIR to enable it"
+        )
+    record = store.get(draft_id)
+    if record is None:
+        raise LookupError("unknown draft id: {}".format(draft_id))
+
+    entries = [
+        _entry_from_dict(item)
+        for item in (record.get("entries") or [])
+        if isinstance(item, dict)
+    ]
+    config_data = record.get("config")
+    workspace = (
+        WorkspaceConfig.from_dict(config_data)
+        if isinstance(config_data, dict)
+        else WorkspaceConfig.default()
+    )
+    qa = analyze_entries(entries, workspace)
+
+    review_store = review_store if review_store is not None else ReviewStore()
+    review_record = review_store.get(draft_id)
+    if review_record is None:
+        review = {
+            "status": REVIEW_PENDING,
+            "reviewer": "",
+            "comment": "",
+            "updated_at": "",
+        }
+    else:
+        review = {
+            "status": review_record.status,
+            "reviewer": review_record.reviewer,
+            "comment": review_record.comment,
+            "updated_at": review_record.updated_at,
+        }
+
+    return {
+        "draft_id": draft_id,
+        "title": record.get("title", ""),
+        "markdown": record.get("markdown", ""),
+        "qa": qa.to_dict(),
+        "checklist": checklist(entries, qa),
+        "rules": rule_summary(entries, qa, workspace),
+        "review": review,
+        "created_at": record.get("created_at", ""),
+    }

@@ -17,6 +17,8 @@ unsupported claims are flagged before publishing.
 - Diff two releases to highlight regressions and repeated claims.
 - Export Markdown for Confluence, GitHub Releases or e-mail, and the QA flags,
   checklist and diff as CSV / JSON for spreadsheets and tooling.
+- Hand a draft to a colleague with a read-only share link (`/s/<draft_id>`)
+  instead of copy-pasting Markdown or re-uploading the source.
 
 See [CONCEPT.md](CONCEPT.md) for the product goal, users and roadmap.
 
@@ -58,6 +60,8 @@ Configuration:
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
 | GET | `/api/review/<draft_id>` | Current review status plus the audit trail |
+| GET | `/api/share/<draft_id>` | Read-only JSON view of a stored draft (needs `DATA_DIR`) |
+| GET | `/s/<draft_id>` | Read-only HTML share page for a stored draft (needs `DATA_DIR`) |
 | POST | `/api/generate` | Build a draft |
 | POST | `/api/diff` | Compare a previous and a current draft |
 | POST | `/api/review` | Record an approve / reject / reset transition |
@@ -303,6 +307,41 @@ be enabled: set `DATA_DIR` so reviews land in `<DATA_DIR>/reviews.jsonl` and
 `seq`). Without `DATA_DIR` the endpoints still work against an in-memory store,
 but the records are lost on restart and the UI hides the review controls with a
 hint. The review workflow was added in **v0.5.0**.
+
+## Sharing a draft
+
+A draft returned by `POST /api/generate` carries a `draft_id` when history is
+enabled. That id doubles as a **stable, read-only share link** so a reviewer can
+hand the draft to a colleague without copy-pasting Markdown or re-uploading the
+source content.
+
+| Endpoint | Response |
+| --- | --- |
+| `GET /s/<draft_id>` | A small self-contained HTML page (`text/html; charset=utf-8`): the title, the Markdown inside a `<pre>`, the QA counts, the review badge and a link back to `/`. Inline CSS only — no scripts or external stylesheets. |
+| `GET /api/share/<draft_id>` | The same payload as JSON: `{draft_id, title, markdown, qa, checklist, rules, review, created_at}`. |
+
+The stored entries are re-analysed with the **current** QA heuristics and the
+workspace config that produced the draft, and the current review status is
+merged in. Editing `releasenote/qa.py` therefore changes every share link
+without regenerating the draft.
+
+```sh
+# Capture a draft_id from /api/generate …
+curl -X POST 'http://127.0.0.1:8080/api/generate' \
+  -H 'Content-Type: application/json' \
+  -d '{"format": "csv", "content": "id,type,title,description,benefit,source\nA,fix,Fix login,Login no longer fails,Reliable access,A\n"}'
+
+# … then share it.
+curl 'http://127.0.0.1:8080/api/share/DRAFT_ID'
+curl 'http://127.0.0.1:8080/s/DRAFT_ID'      # open this in a browser
+```
+
+Share links **require `DATA_DIR`**: without a stored draft there is nothing to
+serve, and `GET /api/share/<id>` replies with HTTP 400 explaining that history
+is required. An unknown id returns HTTP 404. Both views are **unauthenticated**
+(anyone with the URL can read the draft) and **read-only** (there are no
+approve / reject controls on the HTML page). Neither call writes to disk. The
+feature was added in **v0.8.0** and needs no third-party dependency.
 
 ## Trend analysis
 

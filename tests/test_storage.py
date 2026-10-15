@@ -54,6 +54,48 @@ class DraftStoreTests(unittest.TestCase):
         store.save("t", "m", 1, 0)
         self.assertTrue(os.path.isdir(nested))
 
+    def test_save_persists_entries_and_config_round_trip(self):
+        entries = [
+            {
+                "id": "A",
+                "type": "fix",
+                "title": "Fix login",
+                "description": "Login no longer fails",
+                "benefit": "Reliable access",
+                "source": "A",
+                "link": "",
+                "audience": "",
+            }
+        ]
+        config = {"severity_overrides": {"vague_language": "high"}}
+        record = self.store.save(
+            "R1",
+            "# R1",
+            1,
+            0,
+            entries=entries,
+            config=config,
+            profile="strict",
+        )
+        # A fresh instance reads the same stored data back from disk.
+        fetched = DraftStore(self.tmp.name).get(record["id"])
+        self.assertEqual(fetched["entries"], entries)
+        self.assertEqual(fetched["config"], config)
+        self.assertEqual(fetched["profile"], "strict")
+
+    def test_get_unknown_id_returns_none(self):
+        self.store.save("known", "m", 1, 0)
+        self.assertIsNone(self.store.get("does-not-exist"))
+
+    def test_get_skips_malformed_line(self):
+        record = self.store.save("good", "# good", 1, 0)
+        with open(self.store.path, "a", encoding="utf-8") as handle:
+            handle.write("{not valid json\n")
+            handle.write("\n")
+        self.assertEqual(self.store.get(record["id"])["title"], "good")
+        # The malformed line does not prevent listing either.
+        self.assertEqual(len(self.store.list()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

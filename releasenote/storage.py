@@ -48,7 +48,17 @@ class DraftStore:
         markdown: str,
         entry_count: int,
         high_flags: int,
+        entries: Optional[List[Dict[str, Any]]] = None,
+        config: Optional[Dict[str, Any]] = None,
+        profile: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Append a generated draft and return the stored record.
+
+        ``entries`` and ``config`` are the parsed entries and the resolved
+        workspace config that produced the draft. They are optional so the
+        original four-argument call keeps working, but storing them lets a
+        share link re-run the QA heuristics on the exact source data later.
+        """
         record = {
             "id": uuid.uuid4().hex,
             "title": title,
@@ -56,6 +66,9 @@ class DraftStore:
             "entry_count": entry_count,
             "high_flags": high_flags,
             "markdown": markdown,
+            "entries": list(entries or []),
+            "config": dict(config or {}),
+            "profile": profile,
         }
         with self._lock:
             records = self._read_all()
