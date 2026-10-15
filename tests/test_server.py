@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from unittest import mock
 
+from releasenote.config import WorkspaceConfig
 from releasenote.server import create_server
 from releasenote.service import sample
 
@@ -42,6 +43,20 @@ class ServerTests(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=5) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8"))
 
+    def _post_status(self, path, payload):
+        data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            self.base + path,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
     def test_healthz(self):
         status, body = self._get("/healthz")
         self.assertEqual(status, 200)
@@ -61,6 +76,102 @@ class ServerTests(unittest.TestCase):
         status, body = self._get("/api/sample?format=json")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["format"], "json")
+
+    def test_version_is_0_2_0(self):
+        status, body = self._get("/api/version")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["version"], "0.2.0")
+
+    def test_config_sample_endpoint(self):
+        status, body = self._get("/api/config/sample")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        config = WorkspaceConfig.from_dict(payload)
+        self.assertTrue(config.extra_vague_terms)
+        self.assertEqual(payload, config.to_dict())
+
+    def test_generate_applies_extra_term_and_severity_override(self):
+        content = (
+            "id,type,title,description,benefit,source\n"
+            "A,fix,Blazing sync,Sync is blazing fast,Quick,A\n"
+        )
+        status, result = self._post(
+            "/api/generate",
+            {
+                "content": content,
+                "format": "csv",
+                "config": {
+                    "extra_vague_terms": ["blazing"],
+                    "severity_overrides": {"vague_language": "high"},
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(result["qa"]["publishable"])
+        vague = [f for f in result["qa"]["flags"] if f["code"] == "vague_language"]
+        self.assertEqual(len(vague), 1)
+        self.assertEqual(vague[0]["severity"], "high")
+
+    def test_generate_required_section_missing(self):
+        content = (
+            "id,type,title,description,benefit,source\n"
+            "A,fix,Fix login,Login no longer fails,Reliable access,A\n"
+        )
+        status, result = self._post(
+            "/api/generate",
+            {
+                "content": content,
+                "format": "csv",
+                "config": {"required_sections": ["breaking"]},
+            },
+        )
+        self.assertEqual(status, 200)
+        missing = [
+            f
+            for f in result["qa"]["flags"]
+            if f["code"] == "missing_required_section"
+        ]
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(missing[0]["severity"], "medium")
+        self.assertEqual(missing[0]["entry_id"], "")
+
+    def test_generate_rejects_unknown_config_key(self):
+        status, result = self._post_status(
+            "/api/generate",
+            {"content": sample("csv")["content"], "config": {"nope": []}},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", result)
+
+    def test_generate_rejects_non_list_config_field(self):
+        status, result = self._post_status(
+            "/api/generate",
+            {
+                "content": sample("csv")["content"],
+                "config": {"extra_vague_terms": "blazing"},
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", result)
+
+    def test_generate_rejects_invalid_severity(self):
+        status, result = self._post_status(
+            "/api/generate",
+            {
+                "content": sample("csv")["content"],
+                "config": {"severity_overrides": {"vague_language": "critical"}},
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", result)
+
+    def test_generate_rejects_non_object_config(self):
+        status, result = self._post_status(
+            "/api/generate",
+            {"content": sample("csv")["content"], "config": ["high"]},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", result)
 
     def test_generate_endpoint(self):
         status, result = self._post(
@@ -162,6 +273,36 @@ class ServerHistoryTests(unittest.TestCase):
         ) as resp:
             record = json.loads(resp.read().decode("utf-8"))
         self.assertEqual(record["markdown"], result["markdown"])
+
+    def test_invalid_config_is_not_stored(self):
+        with urllib.request.urlopen(
+            self.base + "/api/history", timeout=5
+        ) as resp:
+            before = json.loads(resp.read().decode("utf-8"))["drafts"]
+
+        request = urllib.request.Request(
+            self.base + "/api/generate",
+            data=json.dumps(
+                {
+                    "content": sample("csv")["content"],
+                    "format": "csv",
+                    "config": {"bogus_key": []},
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
+        error = json.loads(ctx.exception.read().decode("utf-8"))
+        self.assertIn("error", error)
+
+        with urllib.request.urlopen(
+            self.base + "/api/history", timeout=5
+        ) as resp:
+            after = json.loads(resp.read().decode("utf-8"))["drafts"]
+        self.assertEqual(len(after), len(before))
 
     def test_unknown_draft_404(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:

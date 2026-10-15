@@ -59,7 +59,13 @@
       width: 100%;
     }
     textarea { min-height: 260px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
+    textarea.small { min-height: 70px; }
     .row { display: flex; gap: .5rem; align-items: end; flex-wrap: wrap; }
+    details { margin-top: .75rem; border: 1px solid var(--border); border-radius: 8px; padding: .5rem .7rem; }
+    details > summary { cursor: pointer; color: var(--accent); font-size: .9rem; }
+    table.overrides { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    table.overrides th { text-align: left; color: var(--muted); font-weight: 500; padding: .2rem .3rem; }
+    table.overrides td { padding: .2rem .3rem; }
     .row > * { flex: 1; min-width: 140px; }
     button {
       background: var(--accent);
@@ -132,11 +138,79 @@
         <button id="loadCsv" class="secondary">Load CSV sample</button>
         <button id="loadJson" class="secondary">Load JSON sample</button>
       </div>
+
+      <details id="rulesPanel">
+        <summary>Workspace rules</summary>
+        <p class="muted">Tailor the QA heuristics to your team's vocabulary. One term per line or comma separated.</p>
+        <div class="row">
+          <div>
+            <label for="cfgExtra">Extra vague terms</label>
+            <textarea id="cfgExtra" class="small" spellcheck="false" placeholder="blazing&#10;revolutionary"></textarea>
+          </div>
+          <div>
+            <label for="cfgAllow">Allowed terms (never vague)</label>
+            <textarea id="cfgAllow" class="small" spellcheck="false" placeholder="seamless"></textarea>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="cfgBanned">Banned phrases</label>
+            <textarea id="cfgBanned" class="small" spellcheck="false" placeholder="world's best&#10;guaranteed"></textarea>
+          </div>
+          <div>
+            <label for="cfgRequired">Required sections</label>
+            <textarea id="cfgRequired" class="small" spellcheck="false" placeholder="feature&#10;breaking"></textarea>
+          </div>
+        </div>
+        <label>Severity overrides</label>
+        <table class="overrides">
+          <thead><tr><th>Flag code</th><th>Severity</th></tr></thead>
+          <tbody id="overrideRows">
+            <tr>
+              <td><input data-override-code placeholder="vague_language" /></td>
+              <td>
+                <select data-override-severity>
+                  <option value="">(no override)</option>
+                  <option value="high">high</option>
+                  <option value="medium">medium</option>
+                  <option value="low">low</option>
+                </select>
+              </td>
+            </tr>
+            <tr>
+              <td><input data-override-code placeholder="missing_source" /></td>
+              <td>
+                <select data-override-severity>
+                  <option value="">(no override)</option>
+                  <option value="high">high</option>
+                  <option value="medium">medium</option>
+                  <option value="low">low</option>
+                </select>
+              </td>
+            </tr>
+            <tr>
+              <td><input data-override-code placeholder="banned_phrase" /></td>
+              <td>
+                <select data-override-severity>
+                  <option value="">(no override)</option>
+                  <option value="high">high</option>
+                  <option value="medium">medium</option>
+                  <option value="low">low</option>
+                </select>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="row" style="margin-top:.4rem">
+          <button id="loadRules" class="secondary" type="button">Load rule sample</button>
+        </div>
+      </details>
       <div class="status" id="status"></div>
     </section>
 
     <section>
       <div class="summary" id="summary"></div>
+      <div class="summary" id="configSummary"></div>
       <ul class="checklist" id="checklist"></ul>
       <div id="entries"></div>
     </section>
@@ -189,6 +263,65 @@
       ).join("");
     }
 
+    function renderConfig(config) {
+      if (!config) return "";
+      const overrides = Object.keys(config.severity_overrides || {}).map(overrideCode =>
+        '<span class="pill">' + esc(overrideCode) + ' → ' + esc(config.severity_overrides[overrideCode]) + '</span>'
+      ).join("");
+      return [
+        '<span class="pill">extra vague: ' + esc(config.extra_vague_terms.join(", ")) + '</span>',
+        '<span class="pill">allowed: ' + esc(config.allow_terms.join(", ")) + '</span>',
+        '<span class="pill">banned: ' + esc(config.banned_phrases.join(", ")) + '</span>',
+        '<span class="pill">required: ' + esc(config.required_sections.join(", ")) + '</span>',
+        overrides
+      ].join("");
+    }
+
+    function parseList(value) {
+      return value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    }
+
+    function collectConfig() {
+      const config = {};
+      const extra = parseList($("cfgExtra").value);
+      if (extra.length) config.extra_vague_terms = extra;
+      const allow = parseList($("cfgAllow").value);
+      if (allow.length) config.allow_terms = allow;
+      const banned = parseList($("cfgBanned").value);
+      if (banned.length) config.banned_phrases = banned;
+      const required = parseList($("cfgRequired").value);
+      if (required.length) config.required_sections = required;
+      const overrides = {};
+      document.querySelectorAll("[data-override-code]").forEach(input => {
+        const code = input.value.trim();
+        const select = input.parentElement.querySelector("[data-override-severity]");
+        if (code && select && select.value) overrides[code] = select.value;
+      });
+      if (Object.keys(overrides).length) config.severity_overrides = overrides;
+      return config;
+    }
+
+    async function loadRules() {
+      try {
+        const data = await api("/api/config/sample");
+        $("cfgExtra").value = (data.extra_vague_terms || []).join("\n");
+        $("cfgAllow").value = (data.allow_terms || []).join("\n");
+        $("cfgBanned").value = (data.banned_phrases || []).join("\n");
+        $("cfgRequired").value = (data.required_sections || []).join("\n");
+        const overrides = data.severity_overrides || {};
+        const codes = Object.keys(overrides);
+        document.querySelectorAll("[data-override-code]").forEach((input, i) => {
+          const code = codes[i] || "";
+          input.value = code;
+          const select = input.parentElement.querySelector("[data-override-severity]");
+          if (select) select.value = code ? overrides[code] : "";
+        });
+        $("status").textContent = "Sample workspace rules loaded.";
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      }
+    }
+
     function renderResult(result) {
       const counts = result.qa.counts;
       $("summary").innerHTML =
@@ -198,6 +331,8 @@
         '<span class="pill high">' + esc(counts.high) + ' high</span>' +
         '<span class="pill medium">' + esc(counts.medium) + ' medium</span>' +
         '<span class="pill">' + esc(counts.total) + ' flags</span>';
+
+      $("configSummary").innerHTML = renderConfig(result.config);
 
       $("checklist").innerHTML = result.checklist.map(item => {
         const icon = item.status === "pass" ? "\u2705" : (item.status === "warn" ? "\u26a0" : "\u274c");
@@ -227,15 +362,18 @@
       if (!content.trim()) { $("status").textContent = "Paste some data first."; return; }
       $("generate").disabled = true;
       $("status").textContent = "Generating…";
+      const body = {
+        content: content,
+        format: $("format").value,
+        title: $("title").value
+      };
+      const config = collectConfig();
+      if (Object.keys(config).length) body.config = config;
       try {
         const result = await api("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            content: content,
-            format: $("format").value,
-            title: $("title").value
-          })
+          body: JSON.stringify(body)
         });
         renderResult(result);
         $("status").textContent = "Draft generated.";
@@ -275,6 +413,7 @@
     $("generate").addEventListener("click", generate);
     $("loadCsv").addEventListener("click", () => loadSample("csv"));
     $("loadJson").addEventListener("click", () => loadSample("json"));
+    $("loadRules").addEventListener("click", loadRules);
     $("download").addEventListener("click", download);
     loadSample("csv");
     loadHistory();

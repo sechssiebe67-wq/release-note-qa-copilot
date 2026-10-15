@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
+from .config import WorkspaceConfig
+from .grouping import group_entries
 from .models import (
     SEVERITY_HIGH,
     SEVERITY_LOW,
@@ -49,6 +51,43 @@ _VAGUE_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def _effective_vague_terms(config: WorkspaceConfig) -> List[str]:
+    """Combine built-in terms with extra terms minus allowed terms."""
+    allowed = {t.strip().lower() for t in config.allow_terms if t.strip()}
+    terms: List[str] = []
+    seen = set()
+    for term in list(VAGUE_TERMS) + list(config.extra_vague_terms):
+        token = term.strip()
+        key = token.lower()
+        if not key or key in allowed or key in seen:
+            continue
+        seen.add(key)
+        terms.append(token)
+    return terms
+
+
+def _vague_pattern(config: WorkspaceConfig):
+    """Return a compiled vague-term regex for the effective term list."""
+    if config.is_default():
+        return _VAGUE_RE
+    terms = _effective_vague_terms(config)
+    if not terms:
+        return None
+    return re.compile(
+        r"\b(" + "|".join(re.escape(t) for t in terms) + r")\b",
+        re.IGNORECASE,
+    )
+
+
+def _with_override(flag: Flag, config: WorkspaceConfig) -> Flag:
+    """Apply a configured severity override to ``flag`` (in place)."""
+    override = config.severity_overrides.get(flag.code)
+    if override in (SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW):
+        flag.severity = override
+    return flag
+
+
 # Quantified statements such as "50%", "3x", "2 seconds", "5 days".
 _QUANT_RE = re.compile(
     r"(?:\b\d+(?:[.,]\d+)?\s?%"
@@ -73,17 +112,26 @@ def _entry_text(entry: ChangeEntry) -> str:
     )
 
 
-def analyze_entry(entry: ChangeEntry) -> List[Flag]:
-    """Return QA flags for a single entry."""
+def analyze_entry(
+    entry: ChangeEntry, config: Optional[WorkspaceConfig] = None
+) -> List[Flag]:
+    """Return QA flags for a single entry.
+
+    When ``config`` is omitted the built-in rules are used unchanged.
+    """
+    config = config or WorkspaceConfig.default()
     flags: List[Flag] = []
 
     def add(code: str, severity: str, message: str) -> None:
         flags.append(
-            Flag(
-                code=code,
-                severity=severity,
-                message=message,
-                entry_id=entry.id,
+            _with_override(
+                Flag(
+                    code=code,
+                    severity=severity,
+                    message=message,
+                    entry_id=entry.id,
+                ),
+                config,
             )
         )
 
@@ -114,7 +162,12 @@ def analyze_entry(entry: ChangeEntry) -> List[Flag]:
             "No source or link, so no core statement can be traced.",
         )
 
-    vague = sorted({m.group(0).lower() for m in _VAGUE_RE.finditer(text)})
+    pattern = _vague_pattern(config)
+    vague = (
+        sorted({m.group(0).lower() for m in pattern.finditer(text)})
+        if pattern is not None
+        else []
+    )
     if vague:
         add(
             "vague_language",
@@ -123,6 +176,15 @@ def analyze_entry(entry: ChangeEntry) -> List[Flag]:
                 ", ".join(vague)
             ),
         )
+
+    lowered = text.lower()
+    for phrase in config.banned_phrases:
+        if phrase and phrase.lower() in lowered:
+            add(
+                "banned_phrase",
+                SEVERITY_MEDIUM,
+                "Banned phrase used: '{}'.".format(phrase),
+            )
 
     if _QUANT_RE.search(text) and not has_source:
         add(
@@ -141,11 +203,38 @@ def analyze_entry(entry: ChangeEntry) -> List[Flag]:
     return flags
 
 
-def analyze_entries(entries: List[ChangeEntry]) -> QAResult:
-    """Return QA flags for a whole set of entries."""
+def analyze_entries(
+    entries: List[ChangeEntry], config: Optional[WorkspaceConfig] = None
+) -> QAResult:
+    """Return QA flags for a whole set of entries.
+
+    Applies the per-entry rules plus draft-level checks (configured required
+    sections). With no ``config`` the built-in rules are unchanged.
+    """
+    config = config or WorkspaceConfig.default()
     result = QAResult()
     for entry in entries:
-        result.flags.extend(analyze_entry(entry))
+        result.flags.extend(analyze_entry(entry, config))
+
+    if config.required_sections:
+        groups = group_entries(entries)
+        for section in config.required_sections:
+            if not groups.get(section):
+                result.flags.append(
+                    _with_override(
+                        Flag(
+                            code="missing_required_section",
+                            severity=SEVERITY_MEDIUM,
+                            message=(
+                                "Required section '{}' has no entries.".format(
+                                    section
+                                )
+                            ),
+                            entry_id="",
+                        ),
+                        config,
+                    )
+                )
     return result
 
 

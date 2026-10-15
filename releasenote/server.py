@@ -14,8 +14,9 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
+from .config import WorkspaceConfig
 from .importer import ParseError
-from .service import build_draft, sample
+from .service import build_draft, sample, sample_workspace_config
 from .storage import DraftStore
 
 MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MiB upload cap.
@@ -94,6 +95,9 @@ class Handler(BaseHTTPRequestHandler):
             fmt = (query.get("format") or ["csv"])[0]
             self._send_json(200, sample(fmt))
             return
+        if path == "/api/config/sample":
+            self._send_json(200, sample_workspace_config())
+            return
         if path == "/api/history":
             store = getattr(self.server, "store", None)
             query = parse_qs(parsed.query)
@@ -144,10 +148,22 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(fmt, str) or not isinstance(title, str):
             self._send_json(400, {"error": "'format' and 'title' must be strings"})
             return
+        config_payload = payload.get("config")
+        if config_payload is not None and not isinstance(config_payload, dict):
+            self._send_json(400, {"error": "'config' must be a JSON object"})
+            return
         try:
-            result = build_draft(content, fmt, title)
+            workspace = WorkspaceConfig.from_dict(config_payload)
+        except ValueError as exc:
+            self._send_json(400, {"error": "invalid config: {}".format(exc)})
+            return
+        try:
+            result = build_draft(content, fmt, title, workspace)
         except ParseError as exc:
             self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": "invalid config: {}".format(exc)})
             return
         store = getattr(self.server, "store", None)
         if store is not None:
