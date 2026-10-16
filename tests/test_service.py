@@ -398,6 +398,15 @@ class CommentServiceTests(unittest.TestCase):
         with self.assertRaises(LookupError):
             resolve_draft_comment(self.draft_id, "c99", True, self.store)
 
+    def test_resolve_padded_comment_id(self):
+        add_draft_comment(self.draft_id, "REL-1", "hi", "Ada", None, self.store)
+        resolved = resolve_draft_comment(
+            self.draft_id, "  c1  ", True, self.store
+        )
+        self.assertEqual(resolved["comment"]["id"], "c1")
+        self.assertTrue(resolved["comment"]["resolved"])
+        self.assertEqual(resolved["summary"]["unresolved"], 0)
+
     def test_missing_draft_id_raises(self):
         with self.assertRaises(ValueError):
             add_draft_comment("", "REL-1", "hi", "Ada", None, self.store)

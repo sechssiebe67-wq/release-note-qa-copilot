@@ -1604,6 +1604,20 @@ class ServerCommentTests(_CommentServerMixin, unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(again["comment"]["resolved"])
 
+    def test_resolve_padded_comment_id(self):
+        draft_id = self._new_draft()
+        self._post_comment(
+            {"draft_id": draft_id, "entry_id": "REL-1", "body": "x"}
+        )
+        status, body = self._post_resolve(
+            {"draft_id": draft_id, "comment_id": "  c1  ", "resolved": True}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["comment"]["id"], "c1")
+        self.assertTrue(body["comment"]["resolved"])
+        _status, listing = self._get_comments(draft_id)
+        self.assertTrue(listing["comments"][0]["resolved"])
+
     def test_blank_body_is_400_and_stores_nothing(self):
         draft_id = self._new_draft()
         status, body = self._post_comment(

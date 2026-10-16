@@ -690,6 +690,9 @@ class CommentStore:
         value leaves the thread unchanged (one audit line is still written). An
         unknown comment id raises :class:`LookupError`.
         """
+        if not isinstance(comment_id, str) or not comment_id.strip():
+            raise ValueError("comment_id is required")
+        comment_id = comment_id.strip()
         if now is None:
             timestamp = datetime.now(timezone.utc).isoformat()
         elif isinstance(now, datetime):

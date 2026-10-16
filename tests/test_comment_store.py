@@ -46,6 +46,20 @@ class CommentStoreDurableTests(unittest.TestCase):
         with self.assertRaises(LookupError):
             self.store.resolve(self.draft_id, "nope", True)
 
+    def test_resolve_trims_comment_id(self):
+        self.store.add(self.draft_id, "REL-1", "Ada", "a")
+        comment = self.store.resolve(self.draft_id, "  c1  ", True)
+        self.assertEqual(comment["id"], "c1")
+        self.assertTrue(comment["resolved"])
+        thread = self.store.thread(self.draft_id)
+        self.assertTrue(thread["comments"][0]["resolved"])
+        other = CommentStore(self.tmp.name, self.drafts)
+        self.assertTrue(other.thread(self.draft_id)["comments"][0]["resolved"])
+
+    def test_resolve_blank_comment_id_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            self.store.resolve(self.draft_id, "   ", True)
+
     def test_persists_across_instances(self):
         self.store.add(
             self.draft_id,
