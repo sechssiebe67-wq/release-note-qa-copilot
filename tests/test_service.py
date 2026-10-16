@@ -8,13 +8,16 @@ from releasenote.models import Flag, QAResult
 from releasenote.profiles import resolve_config
 from releasenote.service import (
     HistoryRequiredError,
+    add_draft_comment,
     build_diff,
     build_draft,
     get_shared_draft,
+    list_draft_comments,
+    resolve_draft_comment,
     sample,
     sample_workspace_config,
 )
-from releasenote.storage import DraftStore, ReviewStore
+from releasenote.storage import CommentStore, DraftStore, ReviewStore
 
 
 class BuildDraftTests(unittest.TestCase):
@@ -352,6 +355,68 @@ class GetSharedDraftTests(unittest.TestCase):
     def test_history_required_when_store_missing(self):
         with self.assertRaises(HistoryRequiredError):
             get_shared_draft("anything", None)
+
+
+class CommentServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.drafts = DraftStore(self.tmp.name)
+        self.store = CommentStore(self.tmp.name, self.drafts)
+        self.draft_id = self.drafts.save("R1", "# R1", 1, 0)["id"]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_add_list_and_resolve(self):
+        result = add_draft_comment(
+            self.draft_id, "REL-1", "hello", "Ada", None, self.store
+        )
+        self.assertEqual(result["comment"]["id"], "c1")
+        self.assertEqual(result["summary"]["total"], 1)
+        self.assertEqual(result["summary"]["unresolved"], 1)
+
+        listing = list_draft_comments(self.draft_id, self.store)
+        self.assertEqual(len(listing["comments"]), 1)
+        self.assertEqual(listing["comments"][0]["author"], "Ada")
+
+        resolved = resolve_draft_comment(
+            self.draft_id, "c1", True, self.store
+        )
+        self.assertTrue(resolved["comment"]["resolved"])
+        self.assertEqual(resolved["summary"]["unresolved"], 0)
+
+    def test_add_unknown_draft_raises(self):
+        with self.assertRaises(LookupError):
+            add_draft_comment("missing", "REL-1", "hi", "Ada", None, self.store)
+
+    def test_list_unknown_draft_raises(self):
+        with self.assertRaises(LookupError):
+            list_draft_comments("missing", self.store)
+
+    def test_resolve_unknown_comment_raises(self):
+        add_draft_comment(self.draft_id, "REL-1", "hi", "Ada", None, self.store)
+        with self.assertRaises(LookupError):
+            resolve_draft_comment(self.draft_id, "c99", True, self.store)
+
+    def test_missing_draft_id_raises(self):
+        with self.assertRaises(ValueError):
+            add_draft_comment("", "REL-1", "hi", "Ada", None, self.store)
+
+    def test_build_draft_includes_comments_summary(self):
+        add_draft_comment(self.draft_id, "REL-1", "hi", "Ada", None, self.store)
+        payload = build_draft(
+            sample("csv")["content"],
+            "csv",
+            draft_id=self.draft_id,
+            comment_store=self.store,
+        )
+        self.assertIn("comments", payload)
+        self.assertEqual(payload["comments"]["total"], 1)
+        self.assertIn("entries", payload["comments"])
+
+    def test_build_draft_without_draft_id_has_no_comments(self):
+        payload = build_draft(sample("csv")["content"], "csv")
+        self.assertNotIn("comments", payload)
 
 
 class SampleTests(unittest.TestCase):

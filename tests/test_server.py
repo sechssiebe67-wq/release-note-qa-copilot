@@ -80,10 +80,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["format"], "json")
 
-    def test_version_is_0_15_0(self):
+    def test_version_is_0_16_0(self):
         status, body = self._get("/api/version")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["version"], "0.15.0")
+        self.assertEqual(json.loads(body)["version"], "0.16.0")
 
     def test_config_sample_endpoint(self):
         status, body = self._get("/api/config/sample")
@@ -1480,6 +1480,276 @@ class ServerArchiveNoHistoryTests(_ReviewServerMixin, unittest.TestCase):
     def test_archive_sample_needs_no_history(self):
         status, _body = self._get_status("/api/archive/sample")
         self.assertEqual(status, 200)
+
+
+class _CommentServerMixin(_ReviewServerMixin):
+    def _post_comment(self, payload):
+        request = urllib.request.Request(
+            self.base + "/api/comments",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def _post_resolve(self, payload):
+        request = urllib.request.Request(
+            self.base + "/api/comments/resolve",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def _get_comments(self, draft_id):
+        try:
+            with urllib.request.urlopen(
+                self.base + "/api/comments/" + draft_id, timeout=5
+            ) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def _get_export(self, path):
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=5) as resp:
+                return resp.status, resp.headers, resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers, exc.read()
+
+
+class ServerCommentTests(_CommentServerMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.env = mock.patch.dict(os.environ, {"DATA_DIR": cls.tmp.name})
+        cls.env.start()
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+        cls.env.stop()
+        cls.tmp.cleanup()
+
+    def _new_draft(self):
+        return self._generate()["draft_id"]
+
+    def test_generate_payload_includes_empty_comments_summary(self):
+        result = self._generate()
+        self.assertIn("draft_id", result)
+        self.assertIn("comments", result)
+        self.assertEqual(result["comments"]["total"], 0)
+
+    def test_add_and_get_happy_path(self):
+        draft_id = self._new_draft()
+        status, body = self._post_comment(
+            {
+                "draft_id": draft_id,
+                "entry_id": "REL-1",
+                "body": "  Needs a source.  ",
+                "author": "Ada",
+            }
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["comment"]["id"], "c1")
+        self.assertEqual(body["comment"]["body"], "Needs a source.")
+        self.assertEqual(body["comment"]["author"], "Ada")
+        self.assertEqual(body["summary"]["total"], 1)
+        self.assertEqual(body["summary"]["unresolved"], 1)
+
+        status, listing = self._get_comments(draft_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(listing["comments"]), 1)
+        self.assertEqual(listing["comments"][0]["entry_id"], "REL-1")
+
+    def test_reply_threading(self):
+        draft_id = self._new_draft()
+        self._post_comment(
+            {"draft_id": draft_id, "entry_id": "REL-1", "body": "root"}
+        )
+        status, body = self._post_comment(
+            {
+                "draft_id": draft_id,
+                "entry_id": "REL-1",
+                "body": "reply",
+                "parent_id": "c1",
+            }
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["comment"]["parent_id"], "c1")
+
+    def test_resolve_is_idempotent(self):
+        draft_id = self._new_draft()
+        self._post_comment(
+            {"draft_id": draft_id, "entry_id": "REL-1", "body": "x"}
+        )
+        status, body = self._post_resolve(
+            {"draft_id": draft_id, "comment_id": "c1", "resolved": True}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(body["comment"]["resolved"])
+        self.assertEqual(body["summary"]["unresolved"], 0)
+        status, again = self._post_resolve(
+            {"draft_id": draft_id, "comment_id": "c1", "resolved": True}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(again["comment"]["resolved"])
+
+    def test_blank_body_is_400_and_stores_nothing(self):
+        draft_id = self._new_draft()
+        status, body = self._post_comment(
+            {"draft_id": draft_id, "entry_id": "REL-1", "body": "   "}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", body)
+        _status, listing = self._get_comments(draft_id)
+        self.assertEqual(listing["comments"], [])
+
+    def test_non_string_body_is_400(self):
+        draft_id = self._new_draft()
+        status, _body = self._post_comment(
+            {"draft_id": draft_id, "entry_id": "REL-1", "body": 5}
+        )
+        self.assertEqual(status, 400)
+
+    def test_over_long_body_is_400(self):
+        draft_id = self._new_draft()
+        status, _body = self._post_comment(
+            {
+                "draft_id": draft_id,
+                "entry_id": "REL-1",
+                "body": "x" * 5000,
+            }
+        )
+        self.assertEqual(status, 400)
+
+    def test_missing_draft_or_entry_is_400(self):
+        draft_id = self._new_draft()
+        status, _body = self._post_comment({"entry_id": "REL-1", "body": "x"})
+        self.assertEqual(status, 400)
+        status, _body = self._post_comment({"draft_id": draft_id, "body": "x"})
+        self.assertEqual(status, 400)
+
+    def test_unknown_draft_is_404(self):
+        status, body = self._post_comment(
+            {"draft_id": "missing", "entry_id": "REL-1", "body": "x"}
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("error", body)
+        status, body = self._get_comments("missing")
+        self.assertEqual(status, 404)
+
+    def test_resolve_unknown_comment_is_404(self):
+        draft_id = self._new_draft()
+        status, body = self._post_resolve(
+            {"draft_id": draft_id, "comment_id": "c99", "resolved": True}
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("error", body)
+
+    def test_resolve_non_boolean_is_400(self):
+        draft_id = self._new_draft()
+        status, _body = self._post_resolve(
+            {"draft_id": draft_id, "comment_id": "c1", "resolved": "yes"}
+        )
+        self.assertEqual(status, 400)
+
+    def test_oversized_body_is_413(self):
+        huge = "x" * (2 * 1024 * 1024 + 10)
+        request = urllib.request.Request(
+            self.base + "/api/comments",
+            data=json.dumps(
+                {"draft_id": "d", "entry_id": "REL-1", "body": huge}
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=10)
+        self.assertEqual(ctx.exception.code, 413)
+
+    def test_export_csv(self):
+        draft_id = self._new_draft()
+        self._post_comment(
+            {"draft_id": draft_id, "entry_id": "REL-1", "body": "comma, here"}
+        )
+        status, headers, body = self._get_export(
+            "/api/export/comments.csv?draft_id=" + draft_id
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/csv"))
+        self.assertIn("attachment", headers["Content-Disposition"])
+        rows = list(csv.reader(io.StringIO(body.decode("utf-8"))))
+        self.assertEqual(
+            rows[0],
+            ["entry_id", "comment_id", "parent_id", "author", "created_at", "resolved", "body"],
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1][6], "comma, here")
+
+    def test_export_csv_empty_is_header_only(self):
+        draft_id = self._new_draft()
+        status, _headers, body = self._get_export(
+            "/api/export/comments.csv?draft_id=" + draft_id
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            body.decode("utf-8"),
+            "entry_id,comment_id,parent_id,author,created_at,resolved,body\n",
+        )
+
+    def test_export_json(self):
+        draft_id = self._new_draft()
+        self._post_comment(
+            {"draft_id": draft_id, "entry_id": "REL-1", "body": "x"}
+        )
+        status, headers, body = self._get_export(
+            "/api/export/comments.json?draft_id=" + draft_id
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("application/json"))
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["draft_id"], draft_id)
+        self.assertEqual(len(payload["comments"]), 1)
+        self.assertIn("summary", payload)
+
+
+class ServerCommentInMemoryTests(_CommentServerMixin, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.env = mock.patch.dict(os.environ, {})
+        cls.env.start()
+        os.environ.pop("DATA_DIR", None)
+        cls._start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop()
+        cls.env.stop()
+
+    def test_add_and_get_without_history(self):
+        status, body = self._post_comment(
+            {"draft_id": "ephemeral", "entry_id": "REL-1", "body": "hi"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["comment"]["id"], "c1")
+        status, listing = self._get_comments("ephemeral")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(listing["comments"]), 1)
+
+    def test_generate_without_history_has_no_comments_summary(self):
+        result = self._generate()
+        self.assertNotIn("draft_id", result)
+        self.assertNotIn("comments", result)
 
 
 if __name__ == "__main__":

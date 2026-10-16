@@ -63,6 +63,18 @@ VERSIONS_HEADER = ("version", "draft_id", "created_at")
 # the leading column.
 VERSION_DIFF_HEADER = ("version",) + DIFF_HEADER
 
+# The per-entry discussion export, one row per comment. The draft id is not a
+# column because a caller filters the export by ``draft_id`` instead.
+COMMENTS_HEADER = (
+    "entry_id",
+    "comment_id",
+    "parent_id",
+    "author",
+    "created_at",
+    "resolved",
+    "body",
+)
+
 # The profile comparison table repeats the same metrics keyed by profile name.
 PROFILE_COMPARISON_HEADER = (
     "profile",
@@ -492,6 +504,48 @@ def profile_comparison_json(report: Mapping[str, Any]) -> str:
     )
 
 
+def comments_csv(payload: Mapping[str, Any]) -> str:
+    """Return one CSV row per comment.
+
+    Header: ``entry_id,comment_id,parent_id,author,created_at,resolved,body``.
+    The comments come from the ``comments`` list of a comment thread payload
+    (see :func:`releasenote.comments.summarize_thread`). A payload without a
+    ``comments`` list yields just the header row, so the shape is always
+    stable. ``resolved`` is rendered as ``True`` / ``False`` so the CSV
+    round-trips through standard parsers.
+    """
+    rows = []
+    for item in _as_list(_as_mapping(payload).get("comments")):
+        comment = _as_mapping(item)
+        rows.append(
+            (
+                comment.get("entry_id", ""),
+                comment.get("id", ""),
+                comment.get("parent_id") or "",
+                comment.get("author", ""),
+                comment.get("created_at", ""),
+                bool(comment.get("resolved", False)),
+                comment.get("body", ""),
+            )
+        )
+    return _render_csv(COMMENTS_HEADER, rows)
+
+
+def comments_json(payload: Mapping[str, Any]) -> str:
+    """Serialise a comment thread payload as stable, UTF-8 JSON without NaN.
+
+    The result has sorted keys and is identical to the payload's
+    ``draft_id`` / ``comments`` / ``summary`` mapping, so it round-trips through
+    standard parsers.
+    """
+    return json.dumps(
+        _as_mapping(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
 def archive_csv(report: Mapping[str, Any]) -> str:
     """Return one CSV row per archived draft.
 
@@ -591,6 +645,7 @@ __all__ = [
     "RULES_HEADER",
     "SCORE_HEADER",
     "LANGUAGE_HEADER",
+    "COMMENTS_HEADER",
     "TEMPLATE_HEADER",
     "TREND_HEADER",
     "COMPARISON_HEADER",
@@ -621,6 +676,8 @@ __all__ = [
     "profile_comparison_json",
     "archive_csv",
     "archive_json",
+    "comments_csv",
+    "comments_json",
     "versions_csv",
     "versions_json",
     "version_diff_csv",

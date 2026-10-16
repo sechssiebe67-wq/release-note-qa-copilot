@@ -27,6 +27,16 @@ from .archive import (
     normalize_tag,
     validate_tag,
 )
+from .comments import (
+    ANONYMOUS_AUTHOR,
+    MAX_COMMENT_LENGTH,
+    add_comment,
+    normalize_author,
+    resolve_comment,
+    summarize_thread,
+    validate_comment_body,
+    validate_entry_id,
+)
 from .config import WorkspaceConfig
 from .profiles import (
     BUILTIN_PROFILES,
@@ -68,6 +78,8 @@ from .exporters import (
     archive_csv,
     archive_json,
     checklist_csv,
+    comments_csv,
+    comments_json,
     comparison_csv,
     comparison_json,
     comparison_matrix_csv,
@@ -90,9 +102,16 @@ from .exporters import (
     versions_csv,
     versions_json,
 )
-from .storage import ArchiveStore, DraftStore, DraftVersionStore, ReviewStore
+from .storage import (
+    ArchiveStore,
+    CommentStore,
+    DraftStore,
+    DraftVersionStore,
+    ReviewStore,
+)
 from .service import (
     HistoryRequiredError,
+    add_draft_comment,
     build_archive,
     build_comparison,
     build_profile_comparison,
@@ -102,8 +121,10 @@ from .service import (
     get_draft_version,
     get_review,
     get_shared_draft,
+    list_draft_comments,
     list_draft_versions,
     record_review,
+    resolve_draft_comment,
     rollback_draft_version,
     store_draft_version,
     tag_draft,
@@ -137,6 +158,14 @@ __all__ = [
     "filter_drafts",
     "normalize_tag",
     "validate_tag",
+    "ANONYMOUS_AUTHOR",
+    "MAX_COMMENT_LENGTH",
+    "add_comment",
+    "normalize_author",
+    "resolve_comment",
+    "summarize_thread",
+    "validate_comment_body",
+    "validate_entry_id",
     "WorkspaceConfig",
     "RuleProfile",
     "UnknownProfileError",
@@ -199,6 +228,8 @@ __all__ = [
     "profile_comparison_json",
     "archive_csv",
     "archive_json",
+    "comments_csv",
+    "comments_json",
     "versions_csv",
     "versions_json",
     "version_diff_csv",
@@ -206,9 +237,13 @@ __all__ = [
     "ReviewStore",
     "ArchiveStore",
     "DraftVersionStore",
+    "CommentStore",
     "record_review",
     "get_review",
     "get_shared_draft",
+    "add_draft_comment",
+    "list_draft_comments",
+    "resolve_draft_comment",
     "build_archive",
     "get_archive_entry",
     "tag_draft",
@@ -227,4 +262,4 @@ __all__ = [
     "rollback_draft_version",
 ]
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"

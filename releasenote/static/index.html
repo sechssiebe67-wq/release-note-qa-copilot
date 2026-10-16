@@ -386,6 +386,24 @@
       </div>
     </section>
 
+    <section style="grid-column: 1 / -1;" id="commentsHint" hidden>
+      <label>Discussion</label>
+      <p class="muted">Leave threaded, per-entry comments on a draft so feedback stays attached to the specific claim. Set <code>DATA_DIR</code> when starting the server so drafts get an id and the discussion is persisted.</p>
+    </section>
+
+    <section style="grid-column: 1 / -1;" id="commentsSection" hidden>
+      <label>Discussion</label>
+      <div class="summary" id="commentsSummary"></div>
+      <div class="row" style="margin-top:.4rem">
+        <div><label for="commentAuthor">Your name</label><input id="commentAuthor" placeholder="anonymous" /></div>
+      </div>
+      <div id="commentsList" class="muted">No comments yet.</div>
+      <div class="row" style="margin-top:.5rem">
+        <button id="downloadCommentsCsv" class="secondary" type="button">Download comments CSV</button>
+        <button id="downloadCommentsJson" class="secondary" type="button">Download comments JSON</button>
+      </div>
+    </section>
+
     <section style="grid-column: 1 / -1;">
       <div class="row">
         <div><label>Markdown draft</label></div>
@@ -467,6 +485,7 @@
     let lastVersions = null;
     let lastVersionsKey = null;
     let lastVersionDiff = null;
+    let lastComments = null;
 
     async function api(path, options) {
       const res = await fetch(path, options);
@@ -748,9 +767,16 @@
         $("reviewSection").hidden = false;
         $("reviewHint").hidden = true;
         refreshReview(lastDraftId);
+        $("commentsSection").hidden = false;
+        $("commentsHint").hidden = true;
+        refreshComments(lastDraftId);
       } else {
         $("reviewSection").hidden = true;
         $("reviewHint").hidden = false;
+        $("commentsSection").hidden = true;
+        $("commentsHint").hidden = false;
+        $("commentsSummary").innerHTML = "";
+        $("commentsList").textContent = "";
       }
     }
 
@@ -1514,6 +1540,135 @@
       }
     }
 
+    function renderComments(payload) {
+      lastComments = payload || { comments: [], summary: {} };
+      const comments = lastComments.comments || [];
+      const summary = lastComments.summary || {};
+      $("commentsSummary").innerHTML =
+        '<span class="pill">' + esc(summary.total || 0) + ' comments</span>' +
+        '<span class="pill ' + (summary.unresolved ? "medium" : "pass") + '">' +
+          esc(summary.unresolved || 0) + ' unresolved</span>';
+
+      const entries = (lastResult && lastResult.entries) || [];
+      const byEntry = {};
+      comments.forEach(c => { (byEntry[c.entry_id] = byEntry[c.entry_id] || []).push(c); });
+
+      $("commentsList").innerHTML = entries.map(entry => {
+        const list = byEntry[entry.id] || [];
+        const rows = list.map(c => {
+          const when = c.created_at ? esc(new Date(c.created_at).toLocaleString()) : "";
+          const badge = c.resolved
+            ? '<span class="pill pass">resolved</span>'
+            : '<span class="pill medium">open</span>';
+          const reply = c.parent_id
+            ? ' <span class="muted">reply to ' + esc(c.parent_id) + '</span>' : "";
+          const action = c.resolved ? "Reopen" : "Resolve";
+          const next = c.resolved ? "false" : "true";
+          return '<div class="flag ' + (c.resolved ? "low" : "medium") + '">' +
+            '<strong>' + esc(c.author || "anonymous") + '</strong> ' + badge + reply +
+            '<div>' + esc(c.body) + '</div>' +
+            '<div class="muted">' + when + ' · <code>' + esc(c.id) + '</code></div>' +
+            '<button class="secondary" type="button" style="margin-top:.3rem" ' +
+              'data-comment-resolve="' + esc(c.id) + '" data-comment-resolved="' + next + '">' +
+              action + '</button>' +
+          '</div>';
+        }).join("") || '<div class="muted">No comments on this entry.</div>';
+        return '<div class="entry-block">' +
+          '<h3>' + esc(entry.title || "(untitled)") + '</h3>' +
+          '<div class="muted">' + esc(entry.type) + ' · <code>' + esc(entry.id) + '</code></div>' +
+          rows +
+          '<div class="row" style="margin-top:.3rem">' +
+            '<input data-comment-input="' + esc(entry.id) + '" placeholder="Reply to this entry" />' +
+            '<button type="button" style="flex:0" data-comment-add="' + esc(entry.id) + '">Comment</button>' +
+          '</div>' +
+        '</div>';
+      }).join("") || '<div class="muted">No entries to comment on.</div>';
+
+      $("commentsList").querySelectorAll("[data-comment-add]").forEach(btn => {
+        btn.addEventListener("click", () => addComment(btn.getAttribute("data-comment-add")));
+      });
+      $("commentsList").querySelectorAll("[data-comment-resolve]").forEach(btn => {
+        btn.addEventListener("click", () => toggleComment(
+          btn.getAttribute("data-comment-resolve"),
+          btn.getAttribute("data-comment-resolved") === "true"
+        ));
+      });
+    }
+
+    async function refreshComments(draftId) {
+      try {
+        const payload = await api("/api/comments/" + encodeURIComponent(draftId));
+        renderComments(payload);
+      } catch (err) {
+        $("commentsList").textContent = "Discussion unavailable: " + err.message;
+      }
+    }
+
+    async function addComment(entryId) {
+      if (!lastDraftId) { $("status").textContent = "Generate a draft with a draft_id first."; return; }
+      const input = document.querySelector('[data-comment-input="' + entryId + '"]');
+      const body = input ? input.value : "";
+      if (!body.trim()) { $("status").textContent = "Write a comment first."; return; }
+      try {
+        await api("/api/comments", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            draft_id: lastDraftId,
+            entry_id: entryId,
+            body: body,
+            author: $("commentAuthor").value
+          })
+        });
+        if (input) input.value = "";
+        $("status").textContent = "Comment added.";
+        await refreshComments(lastDraftId);
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      }
+    }
+
+    async function toggleComment(commentId, resolved) {
+      if (!lastDraftId) { return; }
+      try {
+        await api("/api/comments/resolve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            draft_id: lastDraftId,
+            comment_id: commentId,
+            resolved: resolved
+          })
+        });
+        $("status").textContent = resolved ? "Comment resolved." : "Comment reopened.";
+        await refreshComments(lastDraftId);
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      }
+    }
+
+    async function downloadComments(format) {
+      if (!lastDraftId) { $("status").textContent = "Generate a draft with a draft_id first."; return; }
+      try {
+        const res = await fetch(
+          "/api/export/comments." + format + "?draft_id=" + encodeURIComponent(lastDraftId)
+        );
+        const text = await res.text();
+        if (!res.ok) {
+          let message = "HTTP " + res.status;
+          try { message = JSON.parse(text).error || message; } catch (e) { /* keep default */ }
+          throw new Error(message);
+        }
+        saveBlob(
+          "draft-comments." + format,
+          text,
+          format === "csv" ? "text/csv" : "application/json"
+        );
+      } catch (err) {
+        $("status").textContent = "Error: " + err.message;
+      }
+    }
+
     function fallbackCopyLink(text, done) {
       const area = document.createElement("textarea");
       area.value = text;
@@ -1896,6 +2051,8 @@
     $("rejectReview").addEventListener("click", () => submitReview("rejected"));
     $("resetReview").addEventListener("click", () => submitReview("pending"));
     $("copyShare").addEventListener("click", copyShareLink);
+    $("downloadCommentsCsv").addEventListener("click", () => downloadComments("csv"));
+    $("downloadCommentsJson").addEventListener("click", () => downloadComments("json"));
     $("searchArchive").addEventListener("click", loadArchive);
     $("downloadArchiveCsv").addEventListener("click", downloadArchiveCsv);
     $("downloadArchiveJson").addEventListener("click", downloadArchiveJson);
