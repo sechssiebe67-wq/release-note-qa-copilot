@@ -94,6 +94,19 @@ PROFILE_COMPARISON_HEADER = (
     "banned_hits",
 )
 
+# The risk heatmap, one row per section, per entry and per flag code.
+HEATMAP_HEADER = (
+    "scope",
+    "key",
+    "label",
+    "flag_count",
+    "high",
+    "medium",
+    "low",
+    "weighted_risk",
+    "heat",
+)
+
 # Canonical order of the diff categories, matching the server payload.
 DIFF_CATEGORIES = (
     "added",
@@ -615,6 +628,60 @@ def versions_json(payload: Mapping[str, Any]) -> str:
     )
 
 
+def heatmap_csv(payload: Mapping[str, Any]) -> str:
+    """Return one CSV row per section, entry and flag code.
+
+    Header: ``scope,key,label,flag_count,high,medium,low,weighted_risk,heat``.
+    ``scope`` is ``section``, ``entry`` or ``code``; ``key`` is the section key,
+    entry id or flag code and ``label`` is the section title, entry title or
+    flag code. A payload without a heatmap (or one that is not a mapping)
+    yields just the header row, so the shape is always stable.
+    """
+    data = _as_mapping(payload)
+    inner = data.get("heatmap")
+    heatmap = inner if isinstance(inner, Mapping) else data
+    rows: List[Sequence[Any]] = []
+
+    def add(scope: str, key: Any, label: Any, row: Mapping[str, Any]) -> None:
+        rows.append(
+            (
+                scope,
+                key,
+                label,
+                row.get("flag_count", 0),
+                row.get("high", 0),
+                row.get("medium", 0),
+                row.get("low", 0),
+                row.get("weighted_risk", 0),
+                row.get("heat", ""),
+            )
+        )
+
+    for section in _as_list(heatmap.get("sections")):
+        item = _as_mapping(section)
+        add("section", item.get("key", ""), item.get("title", ""), item)
+    for entry in _as_list(heatmap.get("entries")):
+        item = _as_mapping(entry)
+        add("entry", item.get("entry_id", ""), item.get("title", ""), item)
+    for code in _as_list(heatmap.get("codes")):
+        item = _as_mapping(code)
+        add("code", item.get("code", ""), item.get("code", ""), item)
+    return _render_csv(HEATMAP_HEADER, rows)
+
+
+def heatmap_json(payload: Mapping[str, Any]) -> str:
+    """Serialise the full heatmap object as stable, UTF-8 JSON without NaN."""
+    data = _as_mapping(payload)
+    inner = data.get("heatmap")
+    heatmap = inner if isinstance(inner, Mapping) else data
+    return json.dumps(
+        heatmap,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
 def version_diff_csv(payload: Mapping[str, Any]) -> str:
     """Return the diff rows for a version comparison with a leading version.
 
@@ -656,6 +723,7 @@ __all__ = [
     "COMPARISON_HEADER",
     "COMPARISON_MATRIX_HEADER",
     "PROFILE_COMPARISON_HEADER",
+    "HEATMAP_HEADER",
     "ARCHIVE_HEADER",
     "VERSIONS_HEADER",
     "VERSION_DIFF_HEADER",
@@ -681,6 +749,8 @@ __all__ = [
     "comparison_json",
     "profile_comparison_csv",
     "profile_comparison_json",
+    "heatmap_csv",
+    "heatmap_json",
     "archive_csv",
     "archive_json",
     "versions_csv",

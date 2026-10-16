@@ -61,6 +61,7 @@ from .language import (
     language_flags,
 )
 from .diff import diff_drafts, compute_diff
+from .heatmap import compute_heatmap, heat_for
 from .trend import compute_trend
 from .compare import compute_comparison
 from .profile_compare import compare_profiles
@@ -76,6 +77,8 @@ from .exporters import (
     comparison_matrix_csv,
     diff_csv,
     draft_json,
+    heatmap_csv,
+    heatmap_json,
     language_csv,
     language_json,
     profile_comparison_csv,
@@ -99,6 +102,7 @@ from .service import (
     build_archive,
     build_changelog,
     build_comparison,
+    build_heatmap,
     build_profile_comparison,
     build_trend,
     diff_draft_versions,
@@ -186,6 +190,11 @@ __all__ = [
     "build_comparison",
     "compare_profiles",
     "build_profile_comparison",
+    "compute_heatmap",
+    "heat_for",
+    "build_heatmap",
+    "heatmap_csv",
+    "heatmap_json",
     "compute_score",
     "score_csv",
     "score_json",
@@ -236,4 +245,4 @@ __all__ = [
     "rollback_draft_version",
 ]
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
