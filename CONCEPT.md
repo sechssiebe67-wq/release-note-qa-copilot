@@ -52,7 +52,8 @@ The MVP is a dependency-free Python web application:
 | Draft archive | Search and filter stored drafts (`q` on draft/entry titles, `tag`, `status`, `band`, `since`/`until`, `limit`/`offset`) and organise them with free-form tags kept in an append-only `archive.jsonl` log (latest action per draft/tag wins); per-draft tag audit trail and CSV/JSON export; requires `DATA_DIR` |
 | Draft versioning | Immutable, ordered versions per logical draft (`draft_key`): regenerating with the same key appends versions `1`, `2`, … to an append-only `versions.jsonl` log; list versions, diff two versions (reusing the diff machinery) and roll back to any version with `rolled_back_from`; CSV/JSON export; requires `DATA_DIR` |
 | Language lint | Deterministic, offline readability + style scoring per draft: Flesch reading ease, sentence length, syllables and long-sentence ratio plus passive voice, first-person, ALL-CAPS, emoji, jargon, mixed tense and duplicate-heading findings folded into the QA flags and the release readiness score; CSV/JSON export |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/archive/sample`, `GET /api/language/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/export/language.csv`, `GET /api/export/language.json`, `GET /api/export/archive.csv`, `GET /api/export/archive.json`, `GET /api/export/versions.csv`, `GET /api/export/versions.json`, `GET /api/export/version-diff.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/archive/<id>`, `GET /api/versions/<draft_key>`, `GET /api/versions/<draft_key>/<version>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles`, `POST /api/archive/tag`, `POST /api/versions/diff`, `POST /api/versions/rollback` |
+| Changelog digest | Roll up 2–50 releases into one machine-readable, publish-ready digest: per-release label, date, title, band, publishable, flag counts, up to three top flag codes and a one-line summary, plus `ready`/`review`/`risky` counts and an overall verdict derived from the worst band present; CSV/JSON export |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/archive/sample`, `GET /api/language/sample`, `GET /api/changelog/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/changelog.csv`, `GET /api/export/changelog.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/export/language.csv`, `GET /api/export/language.json`, `GET /api/export/archive.csv`, `GET /api/export/archive.json`, `GET /api/export/versions.csv`, `GET /api/export/versions.json`, `GET /api/export/version-diff.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/archive/<id>`, `GET /api/versions/<draft_key>`, `GET /api/versions/<draft_key>/<version>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/changelog`, `POST /api/compare`, `POST /api/compare-profiles`, `POST /api/archive/tag`, `POST /api/versions/diff`, `POST /api/versions/rollback` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
@@ -75,6 +76,9 @@ read-only `GET /s/<draft_id>` URL. A *Trend* section accepts one
 release per block, renders the per-release table, inline SVG sparklines for the
 total flag count and sourced ratio and a verdict badge per delta, and exposes
 *Download trend CSV* / *Download trend JSON* after a successful analysis. A
+*Changelog* section accepts one release per block (same shape as the trend
+input), renders the per-release table with a band badge, shows the overall
+verdict and offers *Download changelog CSV* / *Download changelog JSON*. A
 *Compare* section accepts 2–10 drafts (one per block, same shape as the trend
 input), renders the per-draft metrics, the entry presence matrix, the
 shared/unique breakdown and a recommendation badge, and exposes *Download
@@ -107,6 +111,7 @@ releasenote/
   qa.py         heuristic QA rules, language findings, workspace overrides, template sections and checklist
   diff.py       compare two drafts: classification, repeated claims, regressions
   trend.py      multi-release trend analysis: metrics, deltas, verdicts
+  changelog.py  pure changelog digest: per-release summary, counts, top codes, overall verdict
   compare.py    draft comparison matrix: metrics, presence, shared/unique, recommendation
   profile_compare.py  one changelog across rule profiles: metrics, delta, recommendation
   score.py      deterministic release readiness score, band, bounded language penalty and gate policy evaluation
@@ -114,7 +119,7 @@ releasenote/
   versioning.py pure draft-key validation + version numbering, ordering, diff and rollback
   generator.py  Markdown rendering with inline QA annotations and a template layout
   exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, score, language, template, trend, comparison, profile comparison, archive, versions and full payload
-  service.py    parse -> group -> qa -> score -> render pipeline (+ build_diff, build_trend, build_comparison, build_profile_comparison, build_archive, tag_draft, reviews, shared drafts, draft versioning)
+  service.py    parse -> group -> qa -> score -> render pipeline (+ build_diff, build_trend, build_changelog, build_comparison, build_profile_comparison, build_archive, tag_draft, reviews, shared drafts, draft versioning)
   storage.py    optional append-only draft history + review/audit store + archive tag log + version log
   server.py     stdlib HTTP server + JSON API + read-only share pages
   static/       single-page browser UI (draft, diff, language panel, review controls, archive, versions, share link)
@@ -792,6 +797,100 @@ is still the only requirement.
 readability thresholds per workspace), a readability trend across releases and
 per-audience tone targets, all building on the deterministic offline scorer.
 
+## Changelog digest
+
+**Goal.** A release manager who ships several releases already has one QA-checked
+draft per release, but there is no single, machine-readable **"what shipped"**
+rollup: publishing a changelog still means opening every draft, reading its
+counts and re-typing a summary. The **changelog digest** turns a set of stored
+drafts (or an inline list of releases) into one publish-ready digest — per
+release a title, date, band, publishable flag, flag counts, the top flag codes
+and a one-line summary, plus an overall `ready` / `review` / `risky` verdict —
+without re-parsing or re-generating every draft by hand and without changing the
+existing traceability, QA and scoring pipeline.
+
+**Intended users.** Release managers rolling up multiple releases into one
+changelog, and automation that publishes a "what shipped" digest to a release
+page or status channel. Reviewers who must state up front whether a whole train
+of releases is shippable also benefit from the compact per-release rows.
+
+**Current capabilities.** `releasenote.changelog.compute_changelog(drafts)` is a
+pure, dependency-free function over a list of 2–50 draft payloads (the shape
+returned by `build_draft`, each with an optional `label`/`date`). It returns a
+JSON-serialisable mapping in input order:
+
+```json
+{
+  "releases": [
+    {"label": "2026.1", "date": "2026-01-15", "title": "2026.1",
+     "band": "risky", "publishable": false,
+     "counts": {"high": 1, "medium": 1, "low": 0, "total": 2},
+     "top_codes": ["missing_source", "vague_language"],
+     "entry_count": 1,
+     "summary": "1 entry, 2 flags (1 high, 1 medium, 0 low); not publishable (risky)"},
+    {"label": "2026.2", "date": "2026-02-15", "title": "2026.2",
+     "band": "ready", "publishable": true,
+     "counts": {"high": 0, "medium": 0, "low": 0, "total": 0},
+     "top_codes": [],
+     "entry_count": 1,
+     "summary": "1 entry, no flags; publishable (ready)"}
+  ],
+  "total_releases": 2,
+  "ready_count": 1,
+  "review_count": 0,
+  "risky_count": 1,
+  "overall_verdict": "risky"
+}
+```
+
+Every release row carries `label`, `date`, `title`, `band`, `publishable`,
+`counts` (`high`/`medium`/`low`/`total`), `top_codes` (up to three most frequent
+flag codes, ties broken by code ascending), `entry_count` and a non-empty
+one-line `summary`. `overall_verdict` is derived from the worst band present:
+`ready` when every release is `ready`, `risky` when any release is `risky` and
+`review` otherwise.
+
+**Validation.** `compute_changelog` rejects a non-list input, a non-object item,
+an item missing `label`/`title` and a count outside 2–50 with `ValueError`.
+
+**Pipeline and service.** `releasenote.service.build_changelog(releases,
+config=None, profile=None, template=None)` accepts a list of 2–50
+`{label, date?, content, format}` mappings, runs `build_draft` per release under
+the resolved config/profile/template (so a release scores exactly like the same
+content through `POST /api/generate`) and folds the resulting drafts into the
+digest via `compute_changelog`. A missing title falls back to the release label.
+
+**Endpoints.**
+
+| Endpoint | Body / query | Response |
+| --- | --- | --- |
+| `POST /api/changelog` | `{"releases": [{"label", "date"?, "content", "format"}], "profile"?, "config"?, "template"?}` | The full digest as JSON. |
+| `GET /api/changelog/sample` | — | A valid 3-release example payload that `POST /api/changelog` accepts unchanged. |
+| `GET /api/export/changelog.csv` | repeated `release=label:content` (URL-encoded) + optional `format`/`profile`/`config`/`template` | `text/csv` with the header `label,date,title,band,publishable,high,medium,low,total,entry_count,top_codes,summary`, one row per release (`top_codes` joined by `|`). |
+| `GET /api/export/changelog.json` | same as `changelog.csv` | The full digest as stable UTF-8 JSON (sorted keys, no `NaN`). |
+
+The endpoints reuse the existing error mapping: an invalid body (non-list
+`releases`, a missing `content`, a missing `label`, more than 50 releases, an
+unknown profile/template or an invalid config) returns HTTP 400, unparseable
+content returns HTTP 422 and a body over 2 MiB returns HTTP 413. The exports
+answer with a `Content-Disposition: attachment` header and use `\n` line endings
+with RFC-4180 quoting, so a summary containing commas, quotes or newlines
+round-trips through standard parsers. `changelog_csv` / `changelog_json` in
+`releasenote.exporters` build the same output in the browser.
+
+**Browser UI.** The *Changelog* section accepts one release per block (the same
+label-then-content shape as the *Trend* input), posts it to `POST
+/api/changelog`, renders the per-release table with a band badge, shows the
+overall verdict and the `ready`/`review`/`risky` counts, and offers *Download
+changelog CSV* / *Download changelog JSON* buttons built in the browser from the
+returned payload. The section stays hidden until a successful request. The
+feature ships in **v0.16.0** (Python package and Helm chart). No new third-party
+dependency is introduced; the standard library is still the only requirement.
+
+**Next direction.** Persist a digest across releases (a release-train changelog
+keyed by a draft set), attach it to a publish target and schedule automatic
+roll-up generation, building on the deterministic offline digest.
+
 ## Release-note templates
 
 **Goal.** The Copilot has always rendered a **fixed** Markdown skeleton: a
@@ -1117,6 +1216,9 @@ building on the immutable log without a database.
 - Language-aware workspace rules (custom jargon lists, readability thresholds)
   and a readability trend across releases — the offline language lint landed in
   **v0.15.0**; custom lists and trend are still open.
+- Persisted, scheduled changelog roll-ups across a release train and a publish
+  target for the digest — the offline changelog digest landed in **v0.16.0**;
+  persistence and scheduling are still open.
 
 Per-workspace term and tone rules (was the first item in this list) landed in
 **v0.2.0** — see [Workspace configuration](#workspace-configuration).
@@ -1152,6 +1254,9 @@ Immutable draft versioning with list/diff/rollback and CSV/JSON export landed in
 The deterministic offline language lint with readability/style findings, a
 bounded score penalty and CSV/JSON export landed in **v0.15.0** — see
 [Language lint](#language-lint).
+The machine-readable changelog digest for release roll-ups, with per-release
+bands, top flag codes, an overall verdict and CSV/JSON export, landed in
+**v0.16.0** — see [Changelog digest](#changelog-digest).
 
 ## Success signals
 

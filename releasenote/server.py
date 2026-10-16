@@ -19,6 +19,8 @@ from .config import WorkspaceConfig
 from .exporters import (
     archive_csv,
     archive_json,
+    changelog_csv,
+    changelog_json,
     checklist_csv,
     comparison_csv,
     comparison_json,
@@ -58,6 +60,7 @@ from .templates import (
 from .service import (
     HistoryRequiredError,
     build_archive,
+    build_changelog,
     build_comparison,
     build_diff,
     build_draft,
@@ -73,6 +76,7 @@ from .service import (
     rollback_draft_version,
     sample,
     sample_archive,
+    sample_changelog,
     sample_comparison,
     sample_language,
     sample_profile_comparison,
@@ -129,6 +133,16 @@ _TREND_EXPORTS = {
     "/api/export/trend.json": (
         "application/json; charset=utf-8",
         "release-trend.json",
+    ),
+}
+
+# Changelog exports built from repeated ``release=label:content`` query params,
+# the same contract as the trend exports.
+_CHANGELOG_EXPORTS = {
+    "/api/export/changelog.csv": ("text/csv", "release-changelog.csv"),
+    "/api/export/changelog.json": (
+        "application/json; charset=utf-8",
+        "release-changelog.json",
     ),
 }
 
@@ -399,6 +413,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/trend/sample":
             self._send_json(200, sample_trend())
             return
+        if path == "/api/changelog/sample":
+            self._send_json(200, sample_changelog())
+            return
         if path == "/api/compare/sample":
             self._send_json(200, sample_comparison())
             return
@@ -466,6 +483,9 @@ class Handler(BaseHTTPRequestHandler):
         if path in _TREND_EXPORTS:
             self._handle_trend_export(path, parsed)
             return
+        if path in _CHANGELOG_EXPORTS:
+            self._handle_changelog_export(path, parsed)
+            return
         if path in _COMPARE_EXPORTS:
             self._handle_compare_export(path, parsed)
             return
@@ -517,6 +537,86 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = trend_csv(report) if path.endswith(".csv") else trend_json(report)
         content_type, filename = _TREND_EXPORTS[path]
+        self._send(
+            200,
+            body.encode("utf-8"),
+            content_type,
+            {"Content-Disposition": 'attachment; filename="{}"'.format(filename)},
+        )
+
+    def _handle_changelog_export(self, path: str, parsed: Any) -> None:
+        """Serve a changelog CSV/JSON export built from query parameters.
+
+        Each repeated ``release`` parameter is ``label:content`` (URL-encoded),
+        in release order; an optional ``format`` applies to every release, and
+        an optional ``profile`` / ``config`` / ``template`` layer the QA rules
+        exactly like the other exports. Missing or invalid parameters return
+        400, an unknown profile returns 400 naming it and unparseable content
+        returns 422.
+        """
+        query = parse_qs(parsed.query)
+        fmt = _first(query, "format", "auto")
+        if fmt not in _FORMATS:
+            self._send_json(400, {"error": "unsupported format: {!r}".format(fmt)})
+            return
+        raw_releases = query.get("release") or []
+        releases = []
+        for value in raw_releases:
+            label, separator, content = value.partition(":")
+            if not separator or not content.strip():
+                self._send_json(
+                    400, {"error": "each 'release' must be 'label:content'"}
+                )
+                return
+            releases.append(
+                {"label": label.strip(), "content": content, "format": fmt}
+            )
+        profile_name = _first(query, "profile")
+        config_raw = _first(query, "config")
+        inline_config: Any = None
+        if config_raw:
+            try:
+                inline_config = json.loads(config_raw)
+            except json.JSONDecodeError:
+                self._send_json(
+                    400, {"error": "query 'config' must be valid JSON"}
+                )
+                return
+        try:
+            profile_name = normalize_profile_name(profile_name)
+            workspace = resolve_config(
+                {"profile": profile_name, "config": inline_config}
+            )
+        except UnknownProfileError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": "invalid config: {}".format(exc)})
+            return
+        try:
+            template = resolve_template(_first(query, "template"))
+        except UnknownTemplateError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": "invalid template: {}".format(exc)})
+            return
+        try:
+            report = build_changelog(
+                releases, workspace, profile_name, template
+            )
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        body = (
+            changelog_csv(report)
+            if path.endswith(".csv")
+            else changelog_json(report)
+        )
+        content_type, filename = _CHANGELOG_EXPORTS[path]
         self._send(
             200,
             body.encode("utf-8"),
@@ -1089,6 +1189,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/diff",
             "/api/review",
             "/api/trend",
+            "/api/changelog",
             "/api/compare",
             "/api/compare-profiles",
             "/api/archive/tag",
@@ -1114,6 +1215,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/trend":
             self._post_trend(payload)
+            return
+        if path == "/api/changelog":
+            self._post_changelog(payload)
             return
         if path == "/api/compare":
             self._post_compare(payload)
@@ -1212,6 +1316,30 @@ class Handler(BaseHTTPRequestHandler):
         except UnknownProfileError as exc:
             self._send_json(400, {"error": str(exc)})
             return
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        self._send_json(200, result)
+
+    def _post_changelog(self, payload: Dict[str, Any]) -> None:
+        """Build a release-note changelog digest from a release list.
+
+        The body is ``{"releases": [{"label", "date"?, "content", "format"}]}``
+        plus optional ``profile`` / ``config`` / ``template``. Invalid input
+        returns 400, an unknown profile or template returns 400 naming it and
+        unparseable content returns 422.
+        """
+        resolved = self._resolve_request(payload)
+        if resolved is None:
+            return
+        workspace, profile_name, template = resolved
+        try:
+            result = build_changelog(
+                payload.get("releases"), workspace, profile_name, template
+            )
         except ParseError as exc:
             self._send_json(422, {"error": str(exc)})
             return
