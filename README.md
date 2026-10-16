@@ -43,6 +43,9 @@ unsupported claims are flagged before publishing.
   findings (passive voice, first-person slips, ALL-CAPS, emoji, jargon, mixed
   tense, duplicate headings) and a bounded penalty folded into the release
   readiness score.
+- Discuss a draft **per entry**: leave threaded comments attached to the
+  specific claim, reply, mark a thread resolved and download the discussion as
+  CSV/JSON, with an unresolved count folded into the draft payload.
 
 See [CONCEPT.md](CONCEPT.md) for the product goal, users and roadmap.
 
@@ -61,7 +64,7 @@ Configuration:
 | --- | --- | --- |
 | `HOST` | `0.0.0.0` | Listen address |
 | `PORT` | `8080` | Listen port |
-| `DATA_DIR` | unset | Enable draft history plus durable review/audit, archive tag and draft version logs below this directory |
+| `DATA_DIR` | unset | Enable draft history plus durable review/audit, archive tag, draft version and per-entry comment logs below this directory |
 
 ## HTTP API
 
@@ -79,6 +82,8 @@ Configuration:
 | GET | `/api/language/sample` | Example input payload that exercises the language lint |
 | GET | `/api/export/language.csv` | Language findings as CSV (`code,severity,entry_id,message`) |
 | GET | `/api/export/language.json` | Full `language` object as JSON |
+| GET | `/api/export/comments.csv` | Per-entry comments as CSV (`entry_id,comment_id,parent_id,author,created_at,resolved,body`), optional `draft_id` filter |
+| GET | `/api/export/comments.json` | Comment thread payload as JSON, optional `draft_id` filter |
 | GET | `/api/export/qa.csv` | QA flags as CSV (`entry_id,code,severity,message`) |
 | GET | `/api/export/checklist.csv` | QA checklist as CSV (`label,status,detail`) |
 | GET | `/api/export/diff.csv` | Release diff as CSV (`category,id,title,type,reason`) |
@@ -104,6 +109,7 @@ Configuration:
 | GET | `/api/history` | Stored draft summaries (when `DATA_DIR` is set) |
 | GET | `/api/history/<id>` | One stored draft including Markdown |
 | GET | `/api/review/<draft_id>` | Current review status plus the audit trail |
+| GET | `/api/comments/<draft_id>` | Per-entry comment thread plus summary |
 | GET | `/api/archive` | Search/filter/paginate the stored draft archive (needs `DATA_DIR`) |
 | GET | `/api/archive/<draft_id>` | One archived draft’s metadata, tags and tag audit trail |
 | GET | `/api/archive/sample` | Example archive listing for the UI and tests |
@@ -114,6 +120,8 @@ Configuration:
 | POST | `/api/generate` | Build a draft |
 | POST | `/api/diff` | Compare a previous and a current draft |
 | POST | `/api/review` | Record an approve / reject / reset transition |
+| POST | `/api/comments` | Add a per-entry comment (`{draft_id, entry_id, body, author?, parent_id?}`) |
+| POST | `/api/comments/resolve` | Set a comment's resolved flag (`{draft_id, comment_id, resolved}`) |
 | POST | `/api/archive/tag` | Add or remove a tag on a stored draft |
 | POST | `/api/versions/diff` | Diff two versions of the same logical draft |
 | POST | `/api/versions/rollback` | Roll back to a stored version |
@@ -143,7 +151,9 @@ and the effective gate), a `language` report (readability, style, findings and
 summary; its findings are also merged into `qa.flags`), the `score` (with its
 `band` and `penalties`), the `gate` decision (`status` + `reasons`), and a
 `draft_id` when history is enabled. When `draft_key` is supplied and history is enabled the payload also
-echoes `draft_key` and the assigned `version`.
+echoes `draft_key` and the assigned `version`. When a `draft_id` exists the
+payload additionally carries a `comments` summary (see
+[Discussion](#discussion)); drafts without a `draft_id` are unchanged.
 
 ## Workspace rules
 
@@ -1052,6 +1062,68 @@ after a successful generate with the readability numbers, a grade badge, the
 findings table and *Download language CSV* / *Download language JSON* buttons.
 The language lint was added in **v0.15.0**; no third-party dependency is
 required.
+
+## Discussion
+
+A review comment describes the whole draft; the **per-entry discussion** keeps
+feedback attached to the specific claim. When a draft has a `draft_id`
+(history enabled), comments can be added per entry, replied to and resolved:
+
+```sh
+# Add a comment on one entry.
+curl -X POST 'http://127.0.0.1:8080/api/comments' \
+  -H 'Content-Type: application/json' \
+  -d '{"draft_id": "DRAFT_ID", "entry_id": "REL-1", "body": "Where is the source?", "author": "Ada"}'
+
+# Reply to it.
+curl -X POST 'http://127.0.0.1:8080/api/comments' \
+  -H 'Content-Type: application/json' \
+  -d '{"draft_id": "DRAFT_ID", "entry_id": "REL-1", "body": "See REL-104.", "parent_id": "c1"}'
+
+# Resolve (or reopen) the thread.
+curl -X POST 'http://127.0.0.1:8080/api/comments/resolve' \
+  -H 'Content-Type: application/json' \
+  -d '{"draft_id": "DRAFT_ID", "comment_id": "c1", "resolved": true}'
+
+# Read the thread plus summary.
+curl 'http://127.0.0.1:8080/api/comments/DRAFT_ID'
+
+# Download the comments (optionally filtered to one draft).
+curl -G 'http://127.0.0.1:8080/api/export/comments.csv' --data-urlencode 'draft_id=DRAFT_ID'
+curl -G 'http://127.0.0.1:8080/api/export/comments.json' --data-urlencode 'draft_id=DRAFT_ID'
+```
+
+A comment body is trimmed and must be non-empty and at most 4096 characters;
+the author defaults to `anonymous`. Unknown bodies/ids return HTTP 400, an
+unknown draft or comment returns HTTP 404 and a body over 2 MiB returns HTTP
+413. The `comments.jsonl` log is append-only and lives under `DATA_DIR`; without
+`DATA_DIR` the store falls back to memory so the API keeps working but nothing
+survives a restart.
+
+The draft payload gains a `comments` summary when it has a `draft_id`:
+
+```json
+{
+  "comments": {
+    "total": 2,
+    "unresolved": 1,
+    "resolved": 1,
+    "entries": {
+      "REL-1": {"total": 2, "unresolved": 1, "resolved": 1, "participants": ["Ada", "anonymous"]}
+    }
+  }
+}
+```
+
+`GET /api/export/comments.csv` emits the header
+`entry_id,comment_id,parent_id,author,created_at,resolved,body` (one row per
+comment, header only when there are none) and `GET /api/export/comments.json`
+returns the full thread payload as stable UTF-8 JSON (sorted keys, no `NaN`).
+The browser UI adds a *Discussion* panel after a successful generate that lists
+comments grouped by entry with author, timestamp and a resolved badge, a reply
+box, a resolve toggle and *Download comments CSV* / *Download comments JSON*
+buttons; it is replaced by a `DATA_DIR` hint when history is disabled. The
+feature was added in **v0.16.0**; no third-party dependency is required.
 
 ## Input format
 

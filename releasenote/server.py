@@ -15,11 +15,14 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
+from .comments import summarize_thread
 from .config import WorkspaceConfig
 from .exporters import (
     archive_csv,
     archive_json,
     checklist_csv,
+    comments_csv,
+    comments_json,
     comparison_csv,
     comparison_json,
     comparison_matrix_csv,
@@ -57,6 +60,7 @@ from .templates import (
 )
 from .service import (
     HistoryRequiredError,
+    add_draft_comment,
     build_archive,
     build_comparison,
     build_diff,
@@ -68,8 +72,10 @@ from .service import (
     get_draft_version,
     get_review,
     get_shared_draft,
+    list_draft_comments,
     list_draft_versions,
     record_review,
+    resolve_draft_comment,
     rollback_draft_version,
     sample,
     sample_archive,
@@ -81,7 +87,13 @@ from .service import (
     store_draft_version,
     tag_draft,
 )
-from .storage import ArchiveStore, DraftStore, DraftVersionStore, ReviewStore
+from .storage import (
+    ArchiveStore,
+    CommentStore,
+    DraftStore,
+    DraftVersionStore,
+    ReviewStore,
+)
 from .versioning import validate_draft_key
 
 MAX_BODY_BYTES = 2 * 1024 * 1024  # 2 MiB upload cap.
@@ -172,6 +184,15 @@ _VERSION_EXPORTS = {
         "draft-versions.json",
     ),
     "/api/export/version-diff.csv": ("text/csv", "draft-version-diff.csv"),
+}
+# Comment exports are built from the comment store, optionally filtered to one
+# ``draft_id`` query parameter.
+_COMMENT_EXPORTS = {
+    "/api/export/comments.csv": ("text/csv", "draft-comments.csv"),
+    "/api/export/comments.json": (
+        "application/json; charset=utf-8",
+        "draft-comments.json",
+    ),
 }
 _FORMATS = ("auto", "csv", "json")
 
@@ -417,6 +438,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/archive/"):
             self._handle_archive_entry(path)
             return
+        if path.startswith("/api/comments/"):
+            self._handle_comments_get(path)
+            return
         if path.startswith("/api/versions/"):
             self._handle_version_get(path)
             return
@@ -453,6 +477,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._shared_draft(draft_id, json_errors=True)
             if payload is not None:
                 self._send_json(200, payload)
+            return
+        if path in _COMMENT_EXPORTS:
+            self._handle_comment_export(path, parsed)
             return
         if path in _VERSION_EXPORTS:
             self._handle_version_export(path, parsed)
@@ -783,6 +810,70 @@ class Handler(BaseHTTPRequestHandler):
             {"Content-Disposition": 'attachment; filename="{}"'.format(filename)},
         )
 
+    def _comment_store(self) -> Optional[CommentStore]:
+        return getattr(self.server, "comment_store", None)
+
+    def _handle_comments_get(self, path: str) -> None:
+        """Serve the comment thread and summary of a stored draft.
+
+        ``GET /api/comments/<draft_id>`` returns
+        ``{draft_id, comments, summary}``. A missing draft id is HTTP 400 and an
+        unknown draft id is HTTP 404 (when a durable draft registry is
+        available); an unset history store still serves the empty thread so the
+        in-memory fallback keeps the same contract.
+        """
+        draft_id = path[len("/api/comments/"):]
+        try:
+            payload = list_draft_comments(draft_id, self._comment_store())
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except LookupError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        self._send_json(200, payload)
+
+    def _handle_comment_export(self, path: str, parsed: Any) -> None:
+        """Serve the comment CSV/JSON export.
+
+        An optional ``draft_id`` query parameter filters the export to one
+        draft; without it every stored comment is exported. A missing draft is
+        HTTP 404 and the response carries a ``Content-Disposition: attachment``
+        header.
+        """
+        query = parse_qs(parsed.query)
+        draft_id = _first(query, "draft_id")
+        store = self._comment_store()
+        try:
+            if draft_id:
+                payload = list_draft_comments(draft_id, store)
+            else:
+                comments = store.all_comments() if store is not None else []
+                thread = {"draft_id": None, "comments": comments}
+                payload = {
+                    "draft_id": None,
+                    "comments": comments,
+                    "summary": summarize_thread(thread),
+                }
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except LookupError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        body = (
+            comments_csv(payload)
+            if path.endswith(".csv")
+            else comments_json(payload)
+        )
+        content_type, filename = _COMMENT_EXPORTS[path]
+        self._send(
+            200,
+            body.encode("utf-8"),
+            content_type,
+            {"Content-Disposition": 'attachment; filename="{}"'.format(filename)},
+        )
+
     def _handle_profile_export(self, path: str, parsed: Any) -> None:
         """Serve a profile-comparison CSV/JSON export from query parameters.
 
@@ -979,7 +1070,9 @@ class Handler(BaseHTTPRequestHandler):
         store = getattr(self.server, "store", None)
         review_store = getattr(self.server, "review_store", None)
         try:
-            return get_shared_draft(draft_id, store, review_store)
+            return get_shared_draft(
+                draft_id, store, review_store, self._comment_store()
+            )
         except HistoryRequiredError as exc:
             if json_errors:
                 self._send_json(400, {"error": str(exc)})
@@ -1088,6 +1181,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/generate",
             "/api/diff",
             "/api/review",
+            "/api/comments",
+            "/api/comments/resolve",
             "/api/trend",
             "/api/compare",
             "/api/compare-profiles",
@@ -1099,6 +1194,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         payload = self._parse_body()
         if payload is None:
+            return
+        if path == "/api/comments":
+            self._post_comment(payload)
+            return
+        if path == "/api/comments/resolve":
+            self._post_comment_resolve(payload)
             return
         if path == "/api/archive/tag":
             self._post_archive_tag(payload)
@@ -1129,6 +1230,85 @@ class Handler(BaseHTTPRequestHandler):
             self._post_generate(payload, workspace, profile_name, template)
         else:
             self._post_diff(payload, workspace, profile_name, template)
+
+    def _post_comment(self, payload: Dict[str, Any]) -> None:
+        """Add a per-entry comment to a stored draft.
+
+        The body is ``{draft_id, entry_id, body, author?, parent_id?}``. A
+        missing/non-string/blank/over-long body, or a missing ``draft_id`` /
+        ``entry_id``, returns HTTP 400 and stores nothing; an unknown draft id
+        returns HTTP 404 and an unknown ``parent_id`` returns HTTP 400. The
+        response carries the created comment plus its thread summary.
+        """
+        draft_id = payload.get("draft_id")
+        if not isinstance(draft_id, str) or not draft_id.strip():
+            self._send_json(400, {"error": "field 'draft_id' is required"})
+            return
+        entry_id = payload.get("entry_id")
+        if not isinstance(entry_id, str) or not entry_id.strip():
+            self._send_json(400, {"error": "field 'entry_id' is required"})
+            return
+        body = payload.get("body")
+        if not isinstance(body, str):
+            self._send_json(400, {"error": "field 'body' must be a string"})
+            return
+        author = payload.get("author", "")
+        if author is not None and not isinstance(author, str):
+            self._send_json(400, {"error": "field 'author' must be a string"})
+            return
+        parent_id = payload.get("parent_id")
+        if parent_id is not None and not isinstance(parent_id, str):
+            self._send_json(
+                400, {"error": "field 'parent_id' must be a string"}
+            )
+            return
+        try:
+            result = add_draft_comment(
+                draft_id,
+                entry_id,
+                body,
+                author or "",
+                parent_id,
+                self._comment_store(),
+            )
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except LookupError as exc:
+            self._send_json(404 if "draft" in str(exc) else 400, {"error": str(exc)})
+            return
+        self._send_json(200, result)
+
+    def _post_comment_resolve(self, payload: Dict[str, Any]) -> None:
+        """Set the ``resolved`` flag of a stored comment.
+
+        The body is ``{draft_id, comment_id, resolved}``. The operation is
+        idempotent in state. A missing/invalid field returns HTTP 400, an
+        unknown draft id or comment id returns HTTP 404.
+        """
+        draft_id = payload.get("draft_id")
+        if not isinstance(draft_id, str) or not draft_id.strip():
+            self._send_json(400, {"error": "field 'draft_id' is required"})
+            return
+        comment_id = payload.get("comment_id")
+        if not isinstance(comment_id, str) or not comment_id.strip():
+            self._send_json(400, {"error": "field 'comment_id' is required"})
+            return
+        resolved = payload.get("resolved")
+        if not isinstance(resolved, bool):
+            self._send_json(400, {"error": "field 'resolved' must be a boolean"})
+            return
+        try:
+            result = resolve_draft_comment(
+                draft_id, comment_id, resolved, self._comment_store()
+            )
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except LookupError as exc:
+            self._send_json(404, {"error": str(exc)})
+            return
+        self._send_json(200, result)
 
     def _post_archive_tag(self, payload: Dict[str, Any]) -> None:
         """Add or remove a tag on a stored draft.
@@ -1376,6 +1556,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid config: {}".format(exc)})
             return
         self._store(result)
+        comment_store = self._comment_store()
+        if comment_store is not None and result.get("draft_id"):
+            result["comments"] = summarize_thread(
+                comment_store.thread(result["draft_id"])
+            )
         if draft_key is not None and version_store is not None:
             try:
                 store_draft_version(
@@ -1431,6 +1616,8 @@ def create_server(
     server.store = DraftStore(data_dir) if data_dir else None
     server.review_store = ReviewStore(data_dir, server.store)
     server.archive_store = ArchiveStore(data_dir)
+    # Comments work in memory without ``DATA_DIR`` and durably with it.
+    server.comment_store = CommentStore(data_dir, server.store)
     # Versioning needs durable history: with ``DATA_DIR`` unset the version
     # store is ``None`` so every versioning endpoint answers HTTP 409.
     server.version_store = DraftVersionStore(data_dir) if data_dir else None

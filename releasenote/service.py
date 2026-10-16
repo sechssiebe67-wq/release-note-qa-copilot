@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 
 from .archive import filter_drafts, validate_tag
+from .comments import summarize_thread
 from .compare import compute_comparison
 from .config import WorkspaceConfig, sample_config
 from .diff import compute_diff
@@ -30,6 +31,7 @@ from .qa import analyze_entries, checklist
 from .score import compute_score
 from .storage import (
     ArchiveStore,
+    CommentStore,
     DraftStore,
     DraftVersionStore,
     ReviewStore,
@@ -178,6 +180,8 @@ def build_draft(
     template: Optional[Union[ReleaseTemplate, str, Dict[str, Any]]] = None,
     draft_key: Optional[str] = None,
     version_store: Optional[DraftVersionStore] = None,
+    draft_id: Optional[str] = None,
+    comment_store: Optional[CommentStore] = None,
 ) -> Dict[str, Any]:
     """Parse ``content`` and return draft, groups and QA data.
 
@@ -194,6 +198,11 @@ def build_draft(
     back under ``version``. The record itself is appended by the caller once
     the ``draft_id`` is known (see :func:`store_draft_version`), so this
     function stays free of write side effects.
+
+    When both ``draft_id`` and ``comment_store`` are supplied the payload gains
+    a top-level ``comments`` summary (total/unresolved counts per entry) for
+    that stored draft. Without a ``draft_id`` the payload is unchanged, so the
+    default shape is preserved.
 
     Raises :class:`releasenote.importer.ParseError` for invalid input,
     :class:`ValueError` for an invalid config, template or draft key and
@@ -214,6 +223,8 @@ def build_draft(
             payload["version"] = next_version(
                 [record.get("version") for record in existing]
             )
+    if draft_id is not None and comment_store is not None:
+        payload["comments"] = summarize_thread(comment_store.thread(draft_id))
     return payload
 
 
@@ -667,10 +678,92 @@ def get_review(
     return payload
 
 
+def _comment_store(comment_store: Optional[CommentStore]) -> CommentStore:
+    """Return ``comment_store`` or a fresh in-memory store."""
+    return comment_store if comment_store is not None else CommentStore()
+
+
+def add_draft_comment(
+    draft_id: str,
+    entry_id: Any,
+    body: Any,
+    author: Any = "",
+    parent_id: Any = None,
+    comment_store: Optional[CommentStore] = None,
+    now: Any = None,
+) -> Dict[str, Any]:
+    """Add one comment to a stored draft and return it with the thread summary.
+
+    The response is ``{"draft_id", "comment", "summary"}``. Raises
+    :class:`ValueError` for a missing ``draft_id`` or an invalid entry/body and
+    :class:`LookupError` for an unknown draft id; a failed call stores nothing.
+    """
+    if not isinstance(draft_id, str) or not draft_id.strip():
+        raise ValueError("draft_id is required")
+    store = _comment_store(comment_store)
+    if not store.has_draft(draft_id):
+        raise LookupError("unknown draft id: {}".format(draft_id))
+    comment = store.add(draft_id, entry_id, author, body, parent_id, now)
+    summary = summarize_thread(store.thread(draft_id))
+    return {"draft_id": draft_id, "comment": comment, "summary": summary}
+
+
+def list_draft_comments(
+    draft_id: str,
+    comment_store: Optional[CommentStore] = None,
+) -> Dict[str, Any]:
+    """Return the comment thread and summary of a stored draft.
+
+    The response is ``{"draft_id", "comments", "summary"}``. Raises
+    :class:`ValueError` for a missing ``draft_id`` and :class:`LookupError` for
+    an unknown draft id (when a durable draft registry is available).
+    """
+    if not isinstance(draft_id, str) or not draft_id.strip():
+        raise ValueError("draft_id is required")
+    store = _comment_store(comment_store)
+    if not store.has_draft(draft_id):
+        raise LookupError("unknown draft id: {}".format(draft_id))
+    thread = store.thread(draft_id)
+    return {
+        "draft_id": draft_id,
+        "comments": thread["comments"],
+        "summary": summarize_thread(thread),
+    }
+
+
+def resolve_draft_comment(
+    draft_id: str,
+    comment_id: Any,
+    resolved: Any,
+    comment_store: Optional[CommentStore] = None,
+    now: Any = None,
+) -> Dict[str, Any]:
+    """Set the ``resolved`` flag of a stored comment and return the thread.
+
+    The response is ``{"draft_id", "comment", "comments", "summary"}``. The
+    operation is idempotent in state. Raises :class:`ValueError` for missing or
+    invalid fields, :class:`LookupError` for an unknown draft id or comment id.
+    """
+    if not isinstance(draft_id, str) or not draft_id.strip():
+        raise ValueError("draft_id is required")
+    store = _comment_store(comment_store)
+    if not store.has_draft(draft_id):
+        raise LookupError("unknown draft id: {}".format(draft_id))
+    comment = store.resolve(draft_id, comment_id, resolved, now)
+    thread = store.thread(draft_id)
+    return {
+        "draft_id": draft_id,
+        "comment": comment,
+        "comments": thread["comments"],
+        "summary": summarize_thread(thread),
+    }
+
+
 def get_shared_draft(
     draft_id: str,
     store: Optional[Any] = None,
     review_store: Optional[ReviewStore] = None,
+    comment_store: Optional[CommentStore] = None,
 ) -> Dict[str, Any]:
     """Return a read-only, JSON-serialisable view of a stored draft.
 
@@ -728,7 +821,7 @@ def get_shared_draft(
         }
 
     score = compute_score(qa, entries, workspace, language)
-    return {
+    payload = {
         "draft_id": draft_id,
         "title": record.get("title", ""),
         "markdown": record.get("markdown", ""),
@@ -742,6 +835,9 @@ def get_shared_draft(
         "review": review,
         "created_at": record.get("created_at", ""),
     }
+    if comment_store is not None:
+        payload["comments"] = summarize_thread(comment_store.thread(draft_id))
+    return payload
 
 
 def _stored_entries(record: Dict[str, Any]) -> List[ChangeEntry]:

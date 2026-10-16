@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .archive import TAG_ACTIONS, TAG_ADD, validate_tag
+from .comments import add_comment as _add_comment
+from .comments import resolve_comment as _resolve_comment
 from .models import REVIEW_PENDING, ReviewRecord
 from .versioning import next_version, validate_draft_key
 
@@ -530,3 +532,223 @@ class DraftVersionStore:
         """Return the highest-versioned record of ``draft_key`` or ``None``."""
         records = self.list_versions(draft_key)
         return records[-1] if records else None
+
+
+class CommentStore:
+    """Append-only per-entry discussion log for stored drafts.
+
+    Every comment and every resolution is appended to
+    ``<data_dir>/comments.jsonl`` as one JSON object per line carrying a
+    monotonically increasing ``seq``, the ``draft_id``, an ``op`` (``add`` or
+    ``resolve``) and the event payload. A thread is reconstructed by replaying
+    the events for one draft in ``seq`` order, so the log is append-only and the
+    full discussion history stays recoverable.
+
+    When ``data_dir`` is unset the store falls back to an in-memory list, so the
+    comment feature keeps working in ephemeral runs but nothing survives a
+    restart. :attr:`is_durable` reports which mode is active.
+
+    ``draft_store`` is optional. When supplied, a comment may only be added to,
+    listed for or resolved against a draft id that store knows about; otherwise
+    existence cannot be validated and any non-empty draft id is accepted (the
+    same rule :class:`ReviewStore` uses).
+    """
+
+    def __init__(
+        self,
+        data_dir: Optional[str] = None,
+        draft_store: Optional[DraftStore] = None,
+    ) -> None:
+        self.data_dir = data_dir
+        self.draft_store = draft_store
+        if data_dir:
+            os.makedirs(data_dir, exist_ok=True)
+            self.path: Optional[str] = os.path.join(data_dir, "comments.jsonl")
+        else:
+            self.path = None
+        self._lock = threading.Lock()
+        self._events: List[Dict[str, Any]] = []
+
+    @property
+    def is_durable(self) -> bool:
+        """Whether comments are persisted to disk (``DATA_DIR`` set)."""
+        return self.path is not None
+
+    # -- persistence helpers --------------------------------------------
+    def _read_jsonl(self, path: Optional[str]) -> List[Dict[str, Any]]:
+        if not path or not os.path.exists(path):
+            return []
+        records: List[Dict[str, Any]] = []
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return records
+
+    def _append_jsonl(self, path: str, record: Dict[str, Any]) -> None:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _read_all(self) -> List[Dict[str, Any]]:
+        if self.path:
+            return self._read_jsonl(self.path)
+        return list(self._events)
+
+    def _next_seq(self, records: List[Dict[str, Any]]) -> int:
+        if not records:
+            return 1
+        return max(int(record.get("seq", 0)) for record in records) + 1
+
+    def _thread(self, events: List[Dict[str, Any]], draft_id: str) -> Dict[str, Any]:
+        """Reconstruct the comment thread of ``draft_id`` from ``events``."""
+        selected = [
+            event for event in events if event.get("draft_id") == draft_id
+        ]
+        comments: List[Dict[str, Any]] = []
+        index: Dict[Any, Dict[str, Any]] = {}
+        for event in sorted(selected, key=lambda item: item.get("seq", 0)):
+            op = event.get("op")
+            if op == "add":
+                comment = dict(event.get("comment") or {})
+                comments.append(comment)
+                index[comment.get("id")] = comment
+            elif op == "resolve":
+                comment = index.get(event.get("comment_id"))
+                if comment is not None:
+                    comment["resolved"] = bool(event.get("resolved"))
+                    comment["resolved_at"] = event.get("updated_at")
+        return {"draft_id": draft_id, "comments": comments}
+
+    # -- public API ------------------------------------------------------
+    def has_draft(self, draft_id: str) -> bool:
+        """Whether ``draft_id`` may carry comments.
+
+        Without a draft registry (in-memory fallback) existence cannot be
+        checked, so any non-empty id is accepted.
+        """
+        if self.draft_store is not None:
+            return self.draft_store.get(draft_id) is not None
+        return True
+
+    def thread(self, draft_id: str) -> Dict[str, Any]:
+        """Return the reconstructed thread of ``draft_id`` (never ``None``)."""
+        with self._lock:
+            events = self._read_all()
+        return self._thread(events, draft_id)
+
+    def add(
+        self,
+        draft_id: str,
+        entry_id: Any,
+        author: Any = "",
+        body: Any = "",
+        parent_id: Any = None,
+        now: Any = None,
+    ) -> Dict[str, Any]:
+        """Append one comment and return the stored comment record.
+
+        Validation is delegated to :func:`releasenote.comments.add_comment`, so
+        :class:`ValueError` is raised for a bad body/entry and
+        :class:`LookupError` for an unknown ``parent_id``; nothing is appended in
+        either case.
+        """
+        if now is None:
+            now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            events = self._read_all()
+            thread = self._thread(events, draft_id)
+            _new_thread, comment = _add_comment(
+                thread, entry_id, author, body, parent_id, now
+            )
+            event = {
+                "seq": self._next_seq(events),
+                "draft_id": draft_id,
+                "op": "add",
+                "comment": comment,
+            }
+            if self.path:
+                self._append_jsonl(self.path, event)
+            else:
+                self._events.append(event)
+        return comment
+
+    def resolve(
+        self,
+        draft_id: str,
+        comment_id: Any,
+        resolved: Any,
+        now: Any = None,
+    ) -> Dict[str, Any]:
+        """Append a resolution event and return the updated comment.
+
+        Idempotent in state: resolving an already-resolved comment to the same
+        value leaves the thread unchanged (one audit line is still written). An
+        unknown comment id raises :class:`LookupError`.
+        """
+        if now is None:
+            timestamp = datetime.now(timezone.utc).isoformat()
+        elif isinstance(now, datetime):
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            timestamp = now.astimezone(timezone.utc).isoformat()
+        elif isinstance(now, str):
+            timestamp = now
+        else:
+            raise ValueError("'now' must be an ISO-8601 string or a datetime")
+        with self._lock:
+            events = self._read_all()
+            thread = self._thread(events, draft_id)
+            new_thread = _resolve_comment(thread, comment_id, resolved)
+            event = {
+                "seq": self._next_seq(events),
+                "draft_id": draft_id,
+                "op": "resolve",
+                "comment_id": comment_id,
+                "resolved": bool(resolved),
+                "updated_at": timestamp,
+            }
+            if self.path:
+                self._append_jsonl(self.path, event)
+            else:
+                self._events.append(event)
+        return next(
+            comment
+            for comment in new_thread["comments"]
+            if comment.get("id") == comment_id
+        )
+
+    def comments_for(self, draft_id: str) -> List[Dict[str, Any]]:
+        """Return the reconstructed comments of ``draft_id`` in order."""
+        return self.thread(draft_id)["comments"]
+
+    def all_comments(self) -> List[Dict[str, Any]]:
+        """Return every comment across all drafts in creation (``seq``) order.
+
+        Each returned comment carries an extra ``draft_id`` key (the pure
+        comment shape does not), which the export handlers may use to group or
+        filter rows.
+        """
+        with self._lock:
+            events = self._read_all()
+        comments: List[Dict[str, Any]] = []
+        index: Dict[Any, Dict[str, Any]] = {}
+        for event in sorted(events, key=lambda item: item.get("seq", 0)):
+            op = event.get("op")
+            if op == "add":
+                comment = dict(event.get("comment") or {})
+                comment["draft_id"] = event.get("draft_id")
+                comments.append(comment)
+                index[(event.get("draft_id"), comment.get("id"))] = comment
+            elif op == "resolve":
+                comment = index.get(
+                    (event.get("draft_id"), event.get("comment_id"))
+                )
+                if comment is not None:
+                    comment["resolved"] = bool(event.get("resolved"))
+                    comment["resolved_at"] = event.get("updated_at")
+        return comments

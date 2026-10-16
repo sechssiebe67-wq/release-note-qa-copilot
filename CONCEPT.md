@@ -52,7 +52,8 @@ The MVP is a dependency-free Python web application:
 | Draft archive | Search and filter stored drafts (`q` on draft/entry titles, `tag`, `status`, `band`, `since`/`until`, `limit`/`offset`) and organise them with free-form tags kept in an append-only `archive.jsonl` log (latest action per draft/tag wins); per-draft tag audit trail and CSV/JSON export; requires `DATA_DIR` |
 | Draft versioning | Immutable, ordered versions per logical draft (`draft_key`): regenerating with the same key appends versions `1`, `2`, … to an append-only `versions.jsonl` log; list versions, diff two versions (reusing the diff machinery) and roll back to any version with `rolled_back_from`; CSV/JSON export; requires `DATA_DIR` |
 | Language lint | Deterministic, offline readability + style scoring per draft: Flesch reading ease, sentence length, syllables and long-sentence ratio plus passive voice, first-person, ALL-CAPS, emoji, jargon, mixed tense and duplicate-heading findings folded into the QA flags and the release readiness score; CSV/JSON export |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/archive/sample`, `GET /api/language/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/export/language.csv`, `GET /api/export/language.json`, `GET /api/export/archive.csv`, `GET /api/export/archive.json`, `GET /api/export/versions.csv`, `GET /api/export/versions.json`, `GET /api/export/version-diff.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/archive/<id>`, `GET /api/versions/<draft_key>`, `GET /api/versions/<draft_key>/<version>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles`, `POST /api/archive/tag`, `POST /api/versions/diff`, `POST /api/versions/rollback` |
+| Per-entry discussion | Threaded, per-entry reviewer comments on a stored draft: each comment is attached to the entry it is about, may reply to another comment, and carries a resolved flag; the thread is persisted in an append-only `comments.jsonl` log (in-memory fallback without `DATA_DIR`), summarized per entry in the draft payload and exportable as CSV/JSON |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/archive/sample`, `GET /api/language/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/export/language.csv`, `GET /api/export/language.json`, `GET /api/export/comments.csv`, `GET /api/export/comments.json`, `GET /api/export/archive.csv`, `GET /api/export/archive.json`, `GET /api/export/versions.csv`, `GET /api/export/versions.json`, `GET /api/export/version-diff.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/archive/<id>`, `GET /api/comments/<id>`, `GET /api/versions/<draft_key>`, `GET /api/versions/<draft_key>/<version>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/comments`, `POST /api/comments/resolve`, `POST /api/trend`, `POST /api/compare`, `POST /api/compare-profiles`, `POST /api/archive/tag`, `POST /api/versions/diff`, `POST /api/versions/rollback` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
@@ -91,7 +92,11 @@ draft versioned; after a successful generate with a key a *Versions* panel lists
 each version with *View*, *Diff against latest* and *Roll back* actions plus
 *Download versions CSV* / *Download versions JSON* (and *Download version diff
 CSV* after a diff), and the panel is hidden with a `DATA_DIR` hint when history
-is disabled.
+is disabled. A *Discussion* panel (shown after a successful generate when the
+draft has a `draft_id`) lists the per-entry comments grouped by entry with their
+author, timestamp and resolved badge, and offers a reply box, a resolve toggle
+and *Download comments CSV* / *Download comments JSON* buttons that fetch the
+export endpoints; without history it is replaced by a `DATA_DIR` hint.
 
 ## Architecture
 
@@ -104,6 +109,7 @@ releasenote/
   importer.py   CSV/JSON parsing + header aliasing
   grouping.py   bucketing by change type
   language.py   deterministic offline readability + style lint (pure, dependency free)
+  comments.py   pure threaded per-entry discussion: validation, deterministic ids, resolution and summary
   qa.py         heuristic QA rules, language findings, workspace overrides, template sections and checklist
   diff.py       compare two drafts: classification, repeated claims, regressions
   trend.py      multi-release trend analysis: metrics, deltas, verdicts
@@ -115,8 +121,8 @@ releasenote/
   generator.py  Markdown rendering with inline QA annotations and a template layout
   exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, score, language, template, trend, comparison, profile comparison, archive, versions and full payload
   service.py    parse -> group -> qa -> score -> render pipeline (+ build_diff, build_trend, build_comparison, build_profile_comparison, build_archive, tag_draft, reviews, shared drafts, draft versioning)
-  storage.py    optional append-only draft history + review/audit store + archive tag log + version log
-  server.py     stdlib HTTP server + JSON API + read-only share pages
+  storage.py    optional append-only draft history + review/audit store + archive tag log + version log + comment log
+  server.py     stdlib HTTP server + JSON API + comment threads + read-only share pages
   static/       single-page browser UI (draft, diff, language panel, review controls, archive, versions, share link)
 tests/          offline unit tests (no network)
 Dockerfile      non-root, read-only-friendly image
@@ -792,6 +798,79 @@ is still the only requirement.
 readability thresholds per workspace), a readability trend across releases and
 per-audience tone targets, all building on the deterministic offline scorer.
 
+## Per-entry discussion
+
+**Goal.** Review feedback currently lives *next to* the draft — a review comment
+describes the whole draft, and anything entry-specific is lost in a separate chat
+or e-mail. The **per-entry discussion** attaches threaded comments to the
+specific claim being discussed, so a reviewer can ask "where is the source for
+this?" on one entry, a colleague can reply, and the thread is resolved without
+that context drifting away from the draft.
+
+**Intended users.** Support and marketing reviewers who sign off on what
+customers read, product and release managers who triage feedback, and the
+developers who wrote the changes and need to answer a question about one entry.
+
+**How it works.** `releasenote.comments` is a pure, dependency-free module that
+models a discussion as a JSON-serialisable **thread**
+(`{"draft_id": ..., "comments": [...]}`). Each comment carries `id`, `entry_id`,
+`parent_id`, `author`, `body`, `created_at` and a boolean `resolved`. The module
+validates bodies (non-empty after trimming, at most
+`MAX_COMMENT_LENGTH = 4096` characters, strings only) and authors (trimmed,
+defaulting to `anonymous`) and returns a **new** thread from every operation, so
+the input is never mutated. Comment ids are generated deterministically from the
+existing thread (`c1`, `c2`, …) and comments keep creation order, so replaying
+the same operations produces the same result.
+
+`releasenote.storage.CommentStore` persists the thread. Every `add` and every
+`resolve` is appended to `<DATA_DIR>/comments.jsonl` as one JSON object per line
+with a monotonically increasing `seq`, the `draft_id` and an `op` (`add` or
+`resolve`); a thread is reconstructed by replaying that draft's events in `seq`
+order, so the log is append-only and the full discussion history stays
+recoverable. When `DATA_DIR` is unset the store falls back to an in-memory list:
+the feature keeps working in ephemeral runs but nothing survives a restart. As
+with reviews, a `draft_store` may be supplied so a comment can only be attached
+to a known draft; without one any non-empty draft id is accepted.
+
+The discussion is folded into the rest of the product: `build_draft` (and the
+share view) gain a top-level `comments` summary built by
+`releasenote.comments.summarize_thread` — overall `total`, `unresolved` and
+`resolved` counts plus a per-entry breakdown (counts and participants) — so a
+reviewer sees unresolved discussion next to the flags it relates to. The summary
+only appears when a `draft_id` exists, so drafts generated without history are
+byte-for-byte unchanged.
+
+**Endpoints.**
+
+| Endpoint | Body / query | Response |
+| --- | --- | --- |
+| `GET /api/comments/<draft_id>` | — | `{draft_id, comments: [...], summary}`; an unknown draft id is HTTP 404. |
+| `POST /api/comments` | `{draft_id, entry_id, body, author?, parent_id?}` | `{draft_id, comment, summary}`. |
+| `POST /api/comments/resolve` | `{draft_id, comment_id, resolved}` | `{draft_id, comment, comments, summary}`; idempotent. |
+| `GET /api/export/comments.csv` | optional `draft_id` | `text/csv` with the header `entry_id,comment_id,parent_id,author,created_at,resolved,body`, one row per comment (header only when there are none). |
+| `GET /api/export/comments.json` | optional `draft_id` | The comment thread payload as stable UTF-8 JSON (sorted keys, no `NaN`). |
+
+A missing `draft_id` / `entry_id` / `body`, a non-string or over-long body or a
+non-boolean `resolved` returns HTTP 400 and stores nothing; an unknown draft id
+or comment id returns HTTP 404; a body over 2 MiB returns HTTP 413. The exports
+answer with a `Content-Disposition: attachment` header. Unlike the archive and
+versioning features, the discussion API is available **without** `DATA_DIR` (via
+the in-memory fallback), but durability of the `comments.jsonl` log requires it.
+
+**Browser UI.** After a successful generate with a `draft_id`, a *Discussion*
+panel lists comments grouped by entry with author, timestamp and a resolved
+badge, a reply box per entry, a resolve/reopen toggle per comment and *Download
+comments CSV* / *Download comments JSON* buttons that fetch the export endpoints
+for the current draft. Without history the panel is replaced by a `DATA_DIR`
+hint. The feature ships in **v0.16.0** (Python package and Helm chart). No new
+third-party dependency is introduced; the standard library is still the only
+requirement.
+
+**Next direction.** Notifications when a thread is resolved, inline comment
+counts on the read-only share page, @-mentions with a per-thread assignee and a
+comment-aware release readiness signal (for example a gate that fails while a
+high-severity entry still has an unresolved thread).
+
 ## Release-note templates
 
 **Goal.** The Copilot has always rendered a **fixed** Markdown skeleton: a
@@ -1117,6 +1196,9 @@ building on the immutable log without a database.
 - Language-aware workspace rules (custom jargon lists, readability thresholds)
   and a readability trend across releases — the offline language lint landed in
   **v0.15.0**; custom lists and trend are still open.
+- Threaded per-entry comments with resolution state on stored drafts — the pure
+  discussion model, append-only `comments.jsonl` log, API and Discussion panel
+  landed in **v0.16.0**; notifications and comment-aware gating are still open.
 
 Per-workspace term and tone rules (was the first item in this list) landed in
 **v0.2.0** — see [Workspace configuration](#workspace-configuration).
@@ -1152,6 +1234,9 @@ Immutable draft versioning with list/diff/rollback and CSV/JSON export landed in
 The deterministic offline language lint with readability/style findings, a
 bounded score penalty and CSV/JSON export landed in **v0.15.0** — see
 [Language lint](#language-lint).
+Threaded per-entry reviewer discussion with resolution state, a per-entry
+summary in the draft payload and CSV/JSON export landed in **v0.16.0** — see
+[Per-entry discussion](#per-entry-discussion).
 
 ## Success signals
 
