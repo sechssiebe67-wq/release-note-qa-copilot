@@ -47,6 +47,11 @@ unsupported claims are flagged before publishing.
   release a title, date, band, publishable flag, flag counts, top flag codes and
   a one-line summary, plus an overall `ready`/`review`/`risky` verdict and
   CSV/JSON export.
+- See *where* the remaining risk sits with a deterministic **risk heatmap**:
+  per-section, per-entry and per-flag-code weighted risk (high = 3, medium = 2,
+  low = 1) with `cool`/`warm`/`hot` bands, a `total_weighted_risk`, the
+  `hottest_section` and a deterministic `ship`/`hold` recommendation with a
+  reason; served as a pure module, an API endpoint and CSV/JSON exports.
 
 See [CONCEPT.md](CONCEPT.md) for the product goal, users and roadmap.
 
@@ -81,6 +86,7 @@ Configuration:
 | GET | `/api/compare/sample` | Example 2-draft comparison payload |
 | GET | `/api/compare-profiles/sample` | Example one-changelog profile-comparison payload |
 | GET | `/api/language/sample` | Example input payload that exercises the language lint |
+| GET | `/api/heatmap/sample` | Example generate body for the risk heatmap |
 | GET | `/api/changelog/sample` | Example 3-release changelog payload |
 | GET | `/api/export/changelog.csv` | Changelog digest as CSV (`label,date,title,band,publishable,high,medium,low,total,entry_count,top_codes,summary`) |
 | GET | `/api/export/changelog.json` | Full changelog digest as JSON |
@@ -102,6 +108,8 @@ Configuration:
 | GET | `/api/export/profile-comparison.json` | Full profile comparison report as JSON |
 | GET | `/api/export/score.csv` | Release readiness score penalties as CSV (`code,severity,count,points`) |
 | GET | `/api/export/score.json` | Full `score` object as JSON |
+| GET | `/api/export/heatmap.csv` | Risk heatmap as CSV (`scope,key,label,flag_count,high,medium,low,weighted_risk,heat`) |
+| GET | `/api/export/heatmap.json` | Full risk heatmap as JSON |
 | GET | `/api/export/archive.csv` | Draft archive listing as CSV (`draft_id,title,created_at,status,band,entry_count,tags`) |
 | GET | `/api/export/archive.json` | Full draft archive listing as JSON |
 | GET | `/api/export/versions.csv` | Draft version listing as CSV (`version,draft_id,created_at`) |
@@ -126,6 +134,7 @@ Configuration:
 | POST | `/api/versions/rollback` | Roll back to a stored version |
 | POST | `/api/trend` | Analyse an ordered list of 2–20 releases |
 | POST | `/api/changelog` | Build a changelog digest from 2–50 releases |
+| POST | `/api/heatmap` | Build a risk heatmap from a generate-style body |
 | POST | `/api/compare` | Compare 2–10 candidate drafts |
 | POST | `/api/compare-profiles` | Compare one changelog across QA rule profiles |
 
@@ -986,6 +995,100 @@ status after a successful generate or diff, and adds *Download score CSV* /
 *Download score JSON* buttons built in the browser from the payload already on
 screen (no extra server round-trip). The release readiness score and gate policy
 were added in **v0.12.0**; no third-party dependency is required.
+
+## Risk heatmap
+
+A single score says *how risky* a draft is but not *where* the risk sits. The
+**risk heatmap** breaks the existing QA flags down by section, by entry and by
+flag code, and turns them into a deterministic `ship` / `hold` recommendation.
+It is a pure, offline function of the same flags and readiness score the draft
+already carries, so it is reproducible and needs no third-party dependency.
+
+```sh
+curl 'http://127.0.0.1:8080/api/heatmap/sample'
+
+curl -X POST 'http://127.0.0.1:8080/api/heatmap' \
+  -H 'Content-Type: application/json' \
+  -d '{"format": "csv", "content": "id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,A much better experience,\n"}'
+```
+
+`POST /api/heatmap` accepts the same body as `POST /api/generate` (`content`
+plus optional `format` / `title` / `profile` / `config` / `template`) and
+returns:
+
+```json
+{
+  "sections": [
+    {"key": "feature", "title": "Features", "entry_count": 1, "flag_count": 2,
+     "high": 1, "medium": 1, "low": 0, "weighted_risk": 5, "heat": "hot"}
+  ],
+  "entries": [
+    {"entry_id": "REL-1", "title": "Bulk export", "type": "feature",
+     "flag_count": 2, "high": 1, "medium": 1, "low": 0, "weighted_risk": 5,
+     "heat": "hot"}
+  ],
+  "codes": [
+    {"code": "missing_source", "severity": "high", "count": 1, "flag_count": 1,
+     "high": 1, "medium": 0, "low": 0, "weighted_risk": 3, "heat": "warm"},
+    {"code": "vague_language", "severity": "medium", "count": 1, "flag_count": 1,
+     "high": 0, "medium": 1, "low": 0, "weighted_risk": 2, "heat": "warm"}
+  ],
+  "total_weighted_risk": 5,
+  "hottest_section": "feature",
+  "recommendation": {"decision": "hold", "reason": "1 high-severity flag(s) remain."},
+  "readiness_band": "risky",
+  "high_flag_count": 1
+}
+```
+
+Every flag weighs `high = 3`, `medium = 2`, `low = 1`, so
+`weighted_risk == 3*high + 2*medium + 1*low` for every section, entry and code
+row; the section rows always cover all four canonical groups (`feature`, `fix`,
+`breaking`, `other`) and sum to `total_weighted_risk`. The `heat` band is `cool`
+for `0`, `warm` for `1–3` and `hot` for `4+`. Entries are ordered by descending
+weighted risk with ties broken by entry id ascending; codes by descending
+weighted risk then code ascending. A flag is attributed to the section of the
+entry it names, and a draft-level flag (empty `entry_id`) falls under `other`.
+The recommendation is `hold` when any high-severity flag remains or the
+readiness band is `risky`, otherwise `ship`, and the `reason` names the deciding
+factor.
+
+Download the heatmap (same `format`, `title`, `content`, `profile`, `config`
+and `template` query parameters as the other exports):
+
+```sh
+curl -G 'http://127.0.0.1:8080/api/export/heatmap.csv' \
+  --data-urlencode 'format=csv' \
+  --data-urlencode $'content=id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,A much better experience,\n'
+```
+
+```csv
+scope,key,label,flag_count,high,medium,low,weighted_risk,heat
+section,feature,Features,2,1,1,0,5,hot
+section,fix,Fixes,0,0,0,0,0,cool
+section,breaking,Breaking Changes,0,0,0,0,0,cool
+section,other,Other Changes,0,0,0,0,0,cool
+entry,REL-1,Bulk export,2,1,1,0,5,hot
+code,missing_source,missing_source,1,1,0,0,3,warm
+code,vague_language,vague_language,1,0,1,0,2,warm
+```
+
+| Endpoint | Shape |
+| --- | --- |
+| `GET /api/heatmap/sample` | A valid generate body for the UI and tests. |
+| `POST /api/heatmap` | The full heatmap object (same body as `/api/generate`). |
+| `GET /api/export/heatmap.csv` | `scope,key,label,flag_count,high,medium,low,weighted_risk,heat` — one row per section, entry and code. |
+| `GET /api/export/heatmap.json` | The full heatmap object as stable JSON. |
+
+Both exports answer with a `Content-Disposition: attachment` header; missing or
+invalid parameters (including an unknown `profile` or `template`) return HTTP
+400, unparseable content returns HTTP 422 and a body over 2 MiB returns HTTP
+413. The browser UI adds a *Risk heatmap* section shown after a successful
+generate: the per-section heat bands, the top entries, the per-code summary, a
+recommendation badge and *Download heatmap CSV* / *Download heatmap JSON*
+buttons built in the browser from the heatmap already on screen (byte-identical
+to the exports). A *Load heatmap sample* button pre-fills the form from
+`GET /api/heatmap/sample`. The risk heatmap was added in **v0.17.0**.
 
 ## Language lint
 

@@ -15,6 +15,7 @@ from .config import WorkspaceConfig, sample_config
 from .diff import compute_diff
 from .generator import render_markdown
 from .grouping import group_entries, group_titles
+from .heatmap import compute_heatmap
 from .importer import parse_entries, sample_csv, sample_json
 from .language import compute_language
 from .models import (
@@ -43,6 +44,7 @@ from .templates import (
     ReleaseTemplate,
     default_template,
     resolve_template,
+    resolve_template_from_payload,
     template_from_dict,
     template_summary,
 )
@@ -539,6 +541,46 @@ def build_profile_comparison(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def build_heatmap(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a risk heatmap from the same body as ``POST /api/generate``.
+
+    ``payload`` carries a ``content`` string plus the optional ``format``,
+    ``title``, ``profile``, ``config`` and ``template`` fields. The content is
+    parsed and QA-checked by :func:`build_draft` (so the heatmap reflects
+    exactly the same flags the draft payload would carry) and the resulting
+    draft is folded into the heatmap by
+    :func:`releasenote.heatmap.compute_heatmap`. The resolved profile name is
+    echoed back under ``profile``.
+
+    Raises :class:`ValueError` for a malformed payload, missing content or an
+    invalid config, :class:`releasenote.profiles.UnknownProfileError` for an
+    unknown profile, :class:`releasenote.templates.UnknownTemplateError` for an
+    unknown template and :class:`releasenote.importer.ParseError` for
+    unparseable content.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+    content = payload.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("field 'content' is required")
+    fmt = payload.get("format", "auto")
+    if not isinstance(fmt, str):
+        raise ValueError("'format' must be a string")
+    title = payload.get("title", "Release Notes")
+    if not isinstance(title, str):
+        raise ValueError("'title' must be a string")
+
+    workspace = resolve_config(payload)
+    profile_name = normalize_profile_name(payload.get("profile"))
+    template = resolve_template_from_payload(payload)
+    draft = build_draft(
+        content, fmt, title, workspace, profile_name, template
+    )
+    heatmap = compute_heatmap(draft, workspace)
+    heatmap["profile"] = profile_name
+    return heatmap
+
+
 def sample(fmt: str = "csv") -> Dict[str, str]:
     """Return example content for the UI and API."""
     fmt = (fmt or "csv").strip().lower()
@@ -732,6 +774,31 @@ def sample_language() -> Dict[str, Any]:
             'REL-2,feature,Bulk export,"Fixed the export job so it runs for '
             'admins.",SHIP IT: saves time for admins \U0001F680.,REL-2\n'
         ).format(long=long_sentence.replace('"', "'")),
+    }
+
+
+def sample_heatmap() -> Dict[str, Any]:
+    """Return an example generate body for ``GET /api/heatmap/sample``.
+
+    It is valid input for ``POST /api/heatmap`` and spreads risk across every
+    canonical section: a high-severity unsourced feature, a vague feature, a
+    clean fix and an unsourced breaking change, so the heatmap exercises every
+    heat band and a ``hold`` recommendation.
+    """
+    return {
+        "format": "csv",
+        "title": "Risk heatmap sample",
+        "content": (
+            "id,type,title,description,benefit,source\n"
+            "REL-1,feature,Bulk export,Export all reports in one click,"
+            "A much better experience,\n"
+            "REL-2,feature,Better search,Search is improved,"
+            "Find things faster,REL-2\n"
+            "REL-3,fix,Timezone fix,Timestamps render in local time,"
+            "Correct local times,REL-3\n"
+            "REL-4,breaking,Drop the v1 API,The legacy v1 API is removed.,"
+            "Migrate before upgrading.,REL-4\n"
+        ),
     }
 
 

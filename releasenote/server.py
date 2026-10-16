@@ -27,6 +27,8 @@ from .exporters import (
     comparison_matrix_csv,
     diff_csv,
     draft_json,
+    heatmap_csv,
+    heatmap_json,
     language_csv,
     language_json,
     profile_comparison_csv,
@@ -64,6 +66,7 @@ from .service import (
     build_comparison,
     build_diff,
     build_draft,
+    build_heatmap,
     build_profile_comparison,
     build_trend,
     diff_draft_versions,
@@ -78,6 +81,7 @@ from .service import (
     sample_archive,
     sample_changelog,
     sample_comparison,
+    sample_heatmap,
     sample_language,
     sample_profile_comparison,
     sample_trend,
@@ -176,6 +180,16 @@ _ARCHIVE_EXPORTS = {
     "/api/export/archive.json": (
         "application/json; charset=utf-8",
         "draft-archive.json",
+    ),
+}
+# Risk-heatmap exports are built from the same ``format``/``title``/``content``
+# plus optional ``profile``/``config``/``template`` query parameters as the
+# other draft exports.
+_HEATMAP_EXPORTS = {
+    "/api/export/heatmap.csv": ("text/csv", "release-heatmap.csv"),
+    "/api/export/heatmap.json": (
+        "application/json; charset=utf-8",
+        "release-heatmap.json",
     ),
 }
 # Version exports are built from the stored version log keyed by ``draft_key``.
@@ -428,6 +442,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/language/sample":
             self._send_json(200, sample_language())
             return
+        if path == "/api/heatmap/sample":
+            self._send_json(200, sample_heatmap())
+            return
         if path == "/api/archive":
             self._handle_archive(parsed)
             return
@@ -485,6 +502,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in _CHANGELOG_EXPORTS:
             self._handle_changelog_export(path, parsed)
+            return
+        if path in _HEATMAP_EXPORTS:
+            self._handle_heatmap_export(path, parsed)
             return
         if path in _COMPARE_EXPORTS:
             self._handle_compare_export(path, parsed)
@@ -617,6 +637,65 @@ class Handler(BaseHTTPRequestHandler):
             else changelog_json(report)
         )
         content_type, filename = _CHANGELOG_EXPORTS[path]
+        self._send(
+            200,
+            body.encode("utf-8"),
+            content_type,
+            {"Content-Disposition": 'attachment; filename="{}"'.format(filename)},
+        )
+
+    def _handle_heatmap_export(self, path: str, parsed: Any) -> None:
+        """Serve a risk-heatmap CSV/JSON export built from query parameters.
+
+        Accepts the same ``format``, ``title``, ``content``, ``profile``,
+        ``config`` and ``template`` query parameters as the other draft
+        exports. Missing or invalid parameters return 400, an unknown profile
+        or template returns 400 naming it and unparseable content returns 422.
+        """
+        query = parse_qs(parsed.query)
+        fmt = _first(query, "format", "auto")
+        if fmt not in _FORMATS:
+            self._send_json(400, {"error": "unsupported format: {!r}".format(fmt)})
+            return
+        content = _first(query, "content")
+        if not content or not content.strip():
+            self._send_json(400, {"error": "query 'content' is required"})
+            return
+        config_raw = _first(query, "config")
+        inline_config: Any = None
+        if config_raw:
+            try:
+                inline_config = json.loads(config_raw)
+            except json.JSONDecodeError:
+                self._send_json(
+                    400, {"error": "query 'config' must be valid JSON"}
+                )
+                return
+        try:
+            result = build_heatmap(
+                {
+                    "content": content,
+                    "format": fmt,
+                    "title": _first(query, "title", "Release Notes"),
+                    "profile": _first(query, "profile"),
+                    "config": inline_config,
+                    "template": _first(query, "template"),
+                }
+            )
+        except UnknownProfileError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except UnknownTemplateError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        body = heatmap_csv(result) if path.endswith(".csv") else heatmap_json(result)
+        content_type, filename = _HEATMAP_EXPORTS[path]
         self._send(
             200,
             body.encode("utf-8"),
@@ -1190,6 +1269,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/review",
             "/api/trend",
             "/api/changelog",
+            "/api/heatmap",
             "/api/compare",
             "/api/compare-profiles",
             "/api/archive/tag",
@@ -1218,6 +1298,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/changelog":
             self._post_changelog(payload)
+            return
+        if path == "/api/heatmap":
+            self._post_heatmap(payload)
             return
         if path == "/api/compare":
             self._post_compare(payload)
@@ -1340,6 +1423,30 @@ class Handler(BaseHTTPRequestHandler):
             result = build_changelog(
                 payload.get("releases"), workspace, profile_name, template
             )
+        except ParseError as exc:
+            self._send_json(422, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        self._send_json(200, result)
+
+    def _post_heatmap(self, payload: Dict[str, Any]) -> None:
+        """Build a deterministic risk heatmap from a generate-style body.
+
+        The body is the same as ``POST /api/generate`` (``content`` plus
+        optional ``format`` / ``title`` / ``profile`` / ``config`` /
+        ``template``). Invalid input returns 400, an unknown profile or
+        template returns 400 naming it and unparseable content returns 422.
+        """
+        try:
+            result = build_heatmap(payload)
+        except UnknownProfileError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        except UnknownTemplateError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
         except ParseError as exc:
             self._send_json(422, {"error": str(exc)})
             return

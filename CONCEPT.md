@@ -49,11 +49,12 @@ The MVP is a dependency-free Python web application:
 | Draft comparison | Compare 2–10 complete draft payloads: per-draft QA metrics, a per-entry presence matrix (`identical` / `changed` / `unique`), a shared/unique breakdown and a deterministic publishability recommendation; export as CSV/JSON |
 | Profile comparison | QA-check one changelog under every built-in rule profile (plus an optional inline config layered on top): per-profile metrics, a delta against the baseline and a deterministic recommended profile; export as CSV/JSON |
 | Release readiness score | A single, explainable 0–100 score per draft with a `ready`/`review`/`risky` band and an optional gate policy (`min_score`, `max_high`) that yields a deterministic `pass`/`fail` ship decision; export as CSV/JSON |
+| Risk heatmap | A deterministic, explainable view of *where* the risk sits: per-section, per-entry and per-flag-code weighted risk (`high`=3, `medium`=2, `low`=1) with `cool`/`warm`/`hot` bands, a `total_weighted_risk`, `hottest_section` and a `ship`/`hold` recommendation with a reason; derived from the existing QA flags and readiness score; CSV/JSON export |
 | Draft archive | Search and filter stored drafts (`q` on draft/entry titles, `tag`, `status`, `band`, `since`/`until`, `limit`/`offset`) and organise them with free-form tags kept in an append-only `archive.jsonl` log (latest action per draft/tag wins); per-draft tag audit trail and CSV/JSON export; requires `DATA_DIR` |
 | Draft versioning | Immutable, ordered versions per logical draft (`draft_key`): regenerating with the same key appends versions `1`, `2`, … to an append-only `versions.jsonl` log; list versions, diff two versions (reusing the diff machinery) and roll back to any version with `rolled_back_from`; CSV/JSON export; requires `DATA_DIR` |
 | Language lint | Deterministic, offline readability + style scoring per draft: Flesch reading ease, sentence length, syllables and long-sentence ratio plus passive voice, first-person, ALL-CAPS, emoji, jargon, mixed tense and duplicate-heading findings folded into the QA flags and the release readiness score; CSV/JSON export |
 | Changelog digest | Roll up 2–50 releases into one machine-readable, publish-ready digest: per-release label, date, title, band, publishable, flag counts, up to three top flag codes and a one-line summary, plus `ready`/`review`/`risky` counts and an overall verdict derived from the worst band present; CSV/JSON export |
-| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/archive/sample`, `GET /api/language/sample`, `GET /api/changelog/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/changelog.csv`, `GET /api/export/changelog.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/export/language.csv`, `GET /api/export/language.json`, `GET /api/export/archive.csv`, `GET /api/export/archive.json`, `GET /api/export/versions.csv`, `GET /api/export/versions.json`, `GET /api/export/version-diff.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/archive/<id>`, `GET /api/versions/<draft_key>`, `GET /api/versions/<draft_key>/<version>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/changelog`, `POST /api/compare`, `POST /api/compare-profiles`, `POST /api/archive/tag`, `POST /api/versions/diff`, `POST /api/versions/rollback` |
+| API | `GET /healthz`, `GET /api/sample`, `GET /api/config/sample`, `GET /api/profiles`, `GET /api/templates`, `GET /api/trend/sample`, `GET /api/compare/sample`, `GET /api/compare-profiles/sample`, `GET /api/archive/sample`, `GET /api/language/sample`, `GET /api/heatmap/sample`, `GET /api/changelog/sample`, `GET /api/export/qa.csv`, `GET /api/export/checklist.csv`, `GET /api/export/diff.csv`, `GET /api/export/draft.json`, `GET /api/export/changelog.csv`, `GET /api/export/changelog.json`, `GET /api/export/rules.csv`, `GET /api/export/rules.json`, `GET /api/export/template.csv`, `GET /api/export/template.json`, `GET /api/export/trend.csv`, `GET /api/export/trend.json`, `GET /api/export/comparison.csv`, `GET /api/export/comparison.json`, `GET /api/export/comparison-matrix.csv`, `GET /api/export/profile-comparison.csv`, `GET /api/export/profile-comparison.json`, `GET /api/export/score.csv`, `GET /api/export/score.json`, `GET /api/export/language.csv`, `GET /api/export/language.json`, `GET /api/export/heatmap.csv`, `GET /api/export/heatmap.json`, `GET /api/export/archive.csv`, `GET /api/export/archive.json`, `GET /api/export/versions.csv`, `GET /api/export/versions.json`, `GET /api/export/version-diff.csv`, `GET /api/history`, `GET /api/review/<id>`, `GET /api/archive/<id>`, `GET /api/versions/<draft_key>`, `GET /api/versions/<draft_key>/<version>`, `GET /api/share/<id>`, `GET /s/<id>`, `POST /api/generate`, `POST /api/diff`, `POST /api/review`, `POST /api/trend`, `POST /api/changelog`, `POST /api/heatmap`, `POST /api/compare`, `POST /api/compare-profiles`, `POST /api/archive/tag`, `POST /api/versions/diff`, `POST /api/versions/rollback` |
 
 The UI is a single page (`releasenote/static/index.html`): paste or load sample
 data, generate, inspect QA flags and copy/download the Markdown. A *QA rule
@@ -68,6 +69,11 @@ CSV*, *Download template JSON*, *Download score CSV*, *Download score JSON*,
 renders the readability numbers, a grade badge and the findings table, and a
 *Load language sample* button pre-fills a lint-rich example from
 `GET /api/language/sample`. A
+*Risk heatmap* section (shown after a successful generate) renders the
+per-section heat bands, the top entries, the per-code summary and a
+recommendation badge, offers *Download heatmap CSV* / *Download heatmap JSON*
+built in the browser from the heatmap on screen, and a *Load heatmap sample*
+button pre-fills from `GET /api/heatmap/sample`. A
 *Release-note template* selector is populated from `GET /api/templates` and is
 sent on generate and diff. Those downloads are built in the browser from the
 payload already on screen, so they need no extra server round-trip. When a draft has a `draft_id`
@@ -115,14 +121,15 @@ releasenote/
   compare.py    draft comparison matrix: metrics, presence, shared/unique, recommendation
   profile_compare.py  one changelog across rule profiles: metrics, delta, recommendation
   score.py      deterministic release readiness score, band, bounded language penalty and gate policy evaluation
+  heatmap.py    pure, deterministic risk heatmap: per-section/entry/code weighted risk, heat bands, ship/hold recommendation
   archive.py    pure tag validation + archive listing filter/pagination
   versioning.py pure draft-key validation + version numbering, ordering, diff and rollback
   generator.py  Markdown rendering with inline QA annotations and a template layout
-  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, score, language, template, trend, comparison, profile comparison, archive, versions and full payload
-  service.py    parse -> group -> qa -> score -> render pipeline (+ build_diff, build_trend, build_changelog, build_comparison, build_profile_comparison, build_archive, tag_draft, reviews, shared drafts, draft versioning)
+  exporters.py  CSV / JSON rendering of qa, checklist, diff, rules, score, language, heatmap, template, trend, comparison, profile comparison, archive, versions and full payload
+  service.py    parse -> group -> qa -> score -> render pipeline (+ build_diff, build_trend, build_changelog, build_heatmap, build_comparison, build_profile_comparison, build_archive, tag_draft, reviews, shared drafts, draft versioning)
   storage.py    optional append-only draft history + review/audit store + archive tag log + version log
   server.py     stdlib HTTP server + JSON API + read-only share pages
-  static/       single-page browser UI (draft, diff, language panel, review controls, archive, versions, share link)
+  static/       single-page browser UI (draft, diff, language panel, heatmap, review controls, archive, versions, share link)
 tests/          offline unit tests (no network)
 Dockerfile      non-root, read-only-friendly image
 deploy/helm/    one chart exposing image digest, ingress, probes, PVC
@@ -696,6 +703,109 @@ screen. The feature ships in **v0.12.0** (Python package and Helm chart). No new
 third-party dependency is introduced; the standard library is still the only
 requirement.
 
+## Risk heatmap
+
+**Goal.** The release readiness score answers *how risky* a draft is, but not
+*where* the remaining risk sits. A release manager still has to read every flag
+to find the one section or entry that is holding the release back. The **risk
+heatmap** turns the existing QA flags and readiness score into a single,
+explainable view: a weighted risk per canonical section, per entry and per flag
+code, with `cool` / `warm` / `hot` bands, an overall `total_weighted_risk`, the
+`hottest_section` and a deterministic `ship` / `hold` recommendation and reason.
+It is derived purely from data the draft already carries, so it stays offline,
+dependency-free and reproducible.
+
+**Intended users.** Product and release managers who need to see *at a glance*
+which section or entry is blocking a ship decision, and QA reviewers who must
+explain the deciding factor before publishing.
+
+**Inputs.** `releasenote.heatmap.compute_heatmap(payload, config=None)` takes a
+draft payload (the shape returned by `build_draft`: `entries` plus a `qa` object
+with `flags`, and optionally `score.band`) and an optional
+`WorkspaceConfig`. `releasenote.service.build_heatmap(payload)` builds that
+draft from the same body as `POST /api/generate` (`content` plus optional
+`format` / `title` / `profile` / `config` / `template`), so the heatmap reflects
+exactly the same flags the draft payload carries.
+
+**Outputs.** The result is a JSON-serialisable mapping with a stable key order:
+
+```json
+{
+  "sections": [
+    {"key": "feature", "title": "Features", "entry_count": 1, "flag_count": 2,
+     "high": 1, "medium": 1, "low": 0, "weighted_risk": 5, "heat": "hot"}
+  ],
+  "entries": [
+    {"entry_id": "REL-1", "title": "Bulk export", "type": "feature",
+     "flag_count": 2, "high": 1, "medium": 1, "low": 0, "weighted_risk": 5,
+     "heat": "hot"}
+  ],
+  "codes": [
+    {"code": "missing_source", "severity": "high", "count": 1, "flag_count": 1,
+     "high": 1, "medium": 0, "low": 0, "weighted_risk": 3, "heat": "warm"},
+    {"code": "vague_language", "severity": "medium", "count": 1, "flag_count": 1,
+     "high": 0, "medium": 1, "low": 0, "weighted_risk": 2, "heat": "warm"}
+  ],
+  "total_weighted_risk": 5,
+  "hottest_section": "feature",
+  "recommendation": {"decision": "hold", "reason": "1 high-severity flag(s) remain."},
+  "readiness_band": "risky",
+  "high_flag_count": 1
+}
+```
+
+- **Weighting.** Every flag weighs `high = 3`, `medium = 2`, `low = 1`, so
+  `weighted_risk == 3*high + 2*medium + 1*low` for every section, entry and code
+  row. The section rows always cover all four canonical groups (`feature`,
+  `fix`, `breaking`, `other`) and sum to `total_weighted_risk`.
+- **Heat bands.** `cool` for `0`, `warm` for `1–3`, `hot` for `>= 4`.
+- **Ordering.** Entries are ordered by descending weighted risk, ties broken by
+  entry id ascending; codes by descending weighted risk then code ascending.
+- **Attribution.** A flag is attributed to the section of the entry named by its
+  `entry_id`; a draft-level flag (empty `entry_id`, such as a missing required
+  section) falls under `other`.
+- **Recommendation.** `hold` when any high-severity flag remains or the readiness
+  band is `risky`, otherwise `ship`; the `reason` names the deciding factor.
+- **Validation.** A malformed payload (not an object, a missing/malformed
+  `entries` or `qa.flags`, or an invalid config) raises `ValueError`.
+
+Running `compute_heatmap` twice on the same payload yields an identical mapping.
+
+**Relation to the score and gate.** The heatmap does not replace the score; it
+*decomposes* the same flags the score summarises and reuses the score's `band`
+for the recommendation, so the two always agree. The gate policy remains the
+enforced `pass` / `fail` decision; the heatmap's `ship` / `hold` recommendation
+is the explainable, non-policy counterpart.
+
+**Endpoints and exports.** `heatmap_csv` renders
+`scope,key,label,flag_count,high,medium,low,weighted_risk,heat` with one row per
+section, per entry and per code (`scope` is `section` / `entry` / `code`), and
+`heatmap_json` serialises the full heatmap as stable UTF-8 JSON.
+
+| Endpoint | Query / body | Response |
+| --- | --- | --- |
+| `GET /api/heatmap/sample` | — | A valid generate body for the UI and tests. |
+| `POST /api/heatmap` | Same body as `/api/generate` | The full heatmap object. |
+| `GET /api/export/heatmap.csv` | `format`, `title`, `content`, `profile`, `config`, `template` | `text/csv` with the documented header. |
+| `GET /api/export/heatmap.json` | Same as `heatmap.csv` | The full heatmap object as stable JSON. |
+
+Both exports answer with a `Content-Disposition: attachment` header; missing or
+invalid parameters (including an unknown `profile` or `template`) return HTTP
+400, unparseable content returns HTTP 422 and a body over 2 MiB returns HTTP 413.
+
+**Browser UI.** A *Risk heatmap* section is shown after a successful generate:
+the per-section heat bands, the top entries, the per-code summary and a
+recommendation badge, plus *Download heatmap CSV* / *Download heatmap JSON*
+buttons built in the browser from the heatmap already on screen (byte-identical
+to the exports) and a *Load heatmap sample* button. The feature ships in
+**v0.17.0** (Python package and Helm chart). No new third-party dependency is
+introduced.
+
+**Next direction.** Persisting the heatmap per stored draft, trending the
+per-section risk across releases, configurable weighting/heat thresholds per
+workspace, and enforcing the `ship` / `hold` recommendation in the release
+pipeline are still open.
+
 ## Language lint
 
 **Goal.** Reviewers already get heuristics for traceability and hype, but
@@ -1219,6 +1329,9 @@ building on the immutable log without a database.
 - Persisted, scheduled changelog roll-ups across a release train and a publish
   target for the digest — the offline changelog digest landed in **v0.16.0**;
   persistence and scheduling are still open.
+- Persisted, per-release risk heatmaps, per-section risk trends and configurable
+  weighting/thresholds — the deterministic offline risk heatmap landed in
+  **v0.17.0**; persistence, trending and configuration are still open.
 
 Per-workspace term and tone rules (was the first item in this list) landed in
 **v0.2.0** — see [Workspace configuration](#workspace-configuration).
@@ -1257,6 +1370,9 @@ bounded score penalty and CSV/JSON export landed in **v0.15.0** — see
 The machine-readable changelog digest for release roll-ups, with per-release
 bands, top flag codes, an overall verdict and CSV/JSON export, landed in
 **v0.16.0** — see [Changelog digest](#changelog-digest).
+The deterministic risk heatmap, with per-section/entry/code weighted risk, heat
+bands, a `ship`/`hold` recommendation and CSV/JSON export, landed in **v0.17.0**
+— see [Risk heatmap](#risk-heatmap).
 
 ## Success signals
 
