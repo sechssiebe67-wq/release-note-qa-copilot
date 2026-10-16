@@ -294,6 +294,26 @@
       </div>
     </section>
 
+    <section style="grid-column: 1 / -1;" id="changelogSection">
+      <label>Changelog</label>
+      <p class="muted">Roll up 2–50 releases into one publish-ready changelog digest. Each block is a label line followed by that release's CSV / JSON content; separate blocks with a blank line. Uses the selected QA rule profile and workspace rules above.</p>
+      <label for="changelogContent">Releases</label>
+      <textarea id="changelogContent" class="small" spellcheck="false" placeholder="2026.1&#10;id,type,title,description,benefit,source&#10;REL-1,feature,Bulk export,Export all reports,A much better experience,&#10;&#10;2026.2&#10;id,type,title,description,benefit,source&#10;REL-1,feature,Bulk export,Export all reports,One-click export saves time,REL-1"></textarea>
+      <div class="row" style="margin-top:.4rem">
+        <button id="runChangelog" type="button">Build changelog</button>
+        <button id="loadChangelogSample" class="secondary" type="button">Load changelog sample</button>
+      </div>
+      <div class="status" id="changelogStatus"></div>
+      <div id="changelogResults" hidden>
+        <div class="summary" id="changelogSummary"></div>
+        <div id="changelogTable"></div>
+        <div class="row" style="margin-top:.6rem" id="changelogExports">
+          <button id="downloadChangelogCsv" class="secondary" type="button">Download changelog CSV</button>
+          <button id="downloadChangelogJson" class="secondary" type="button">Download changelog JSON</button>
+        </div>
+      </div>
+    </section>
+
     <section style="grid-column: 1 / -1;" id="compareSection">
       <label>Compare drafts</label>
       <p class="muted">Enter 2–10 candidate drafts. Each block is a label line followed by that draft's CSV / JSON content; separate blocks with a blank line. Uses the selected QA rule profile and workspace rules above.</p>
@@ -461,6 +481,7 @@
     let lastDraftId = null;
     let profilesByName = {};
     let lastTrend = null;
+    let lastChangelog = null;
     let lastComparison = null;
     let lastProfileComparison = null;
     let lastArchive = null;
@@ -1221,6 +1242,111 @@
       saveBlob("release-trend.json", buildTrendJson(lastTrend), "application/json");
     }
 
+    function changelogBandClass(band) {
+      if (band === "ready") return "pass";
+      if (band === "risky") return "high";
+      return "medium";
+    }
+
+    function renderChangelog(report) {
+      const releases = report.releases || [];
+      $("changelogSummary").innerHTML =
+        '<span class="pill ' + changelogBandClass(report.overall_verdict) + '">overall: ' + esc(report.overall_verdict) + '</span>' +
+        '<span class="pill pass">' + esc(report.ready_count) + ' ready</span>' +
+        '<span class="pill medium">' + esc(report.review_count) + ' review</span>' +
+        '<span class="pill high">' + esc(report.risky_count) + ' risky</span>' +
+        '<span class="pill">' + esc(report.total_releases) + ' releases</span>';
+
+      const header = "<tr><th>Release</th><th>Date</th><th>Title</th><th>Band</th><th>Publishable</th><th>Entries</th><th>High</th><th>Med</th><th>Low</th><th>Total</th><th>Top codes</th><th>Summary</th></tr>";
+      const rows = releases.map(r =>
+        "<tr>" +
+          "<td>" + esc(r.label) + "</td>" +
+          "<td>" + esc(r.date || "—") + "</td>" +
+          "<td>" + esc(r.title) + "</td>" +
+          '<td><span class="pill ' + changelogBandClass(r.band) + '">' + esc(r.band) + '</span></td>' +
+          '<td><span class="pill ' + (r.publishable ? "pass" : "high") + '">' + (r.publishable ? "yes" : "no") + '</span></td>' +
+          "<td>" + esc(r.entry_count) + "</td>" +
+          "<td>" + esc(r.counts.high) + "</td>" +
+          "<td>" + esc(r.counts.medium) + "</td>" +
+          "<td>" + esc(r.counts.low) + "</td>" +
+          "<td>" + esc(r.counts.total) + "</td>" +
+          "<td>" + esc((r.top_codes || []).join(", ") || "—") + "</td>" +
+          "<td>" + esc(r.summary) + "</td>" +
+        "</tr>"
+      ).join("");
+      $("changelogTable").innerHTML =
+        '<table class="trend"><thead>' + header + '</thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    async function loadChangelogSample() {
+      try {
+        const data = await api("/api/changelog/sample");
+        $("changelogContent").value = (data.releases || []).map(r =>
+          r.label + "\n" + r.content
+        ).join("\n\n");
+        $("changelogStatus").textContent = "Changelog sample loaded.";
+      } catch (err) {
+        $("changelogStatus").textContent = "Error: " + err.message;
+      }
+    }
+
+    async function runChangelog() {
+      const releases = parseTrendInput($("changelogContent").value);
+      if (releases.length < 2) {
+        $("changelogStatus").textContent = "Enter at least 2 release blocks separated by a blank line.";
+        return;
+      }
+      $("runChangelog").disabled = true;
+      $("changelogStatus").textContent = "Building changelog…";
+      const body = { releases: releases };
+      const config = collectConfig();
+      if (Object.keys(config).length) body.config = config;
+      const profile = $("profile").value;
+      if (profile) body.profile = profile;
+      try {
+        const report = await api("/api/changelog", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        lastChangelog = report;
+        renderChangelog(report);
+        $("changelogResults").hidden = false;
+        $("changelogStatus").textContent = "Changelog ready.";
+      } catch (err) {
+        lastChangelog = null;
+        $("changelogResults").hidden = true;
+        $("changelogStatus").textContent = "Error: " + err.message;
+      } finally {
+        $("runChangelog").disabled = false;
+      }
+    }
+
+    function buildChangelogCsv(report) {
+      const header = ["label", "date", "title", "band", "publishable", "high",
+        "medium", "low", "total", "entry_count", "top_codes", "summary"];
+      const rows = (report.releases || []).map(r =>
+        [r.label, r.date || "", r.title, r.band, pyBool(r.publishable),
+         r.counts.high, r.counts.medium, r.counts.low, r.counts.total,
+         r.entry_count, (r.top_codes || []).join("|"), r.summary]
+      );
+      return buildCsv(header, rows);
+    }
+
+    function buildChangelogJson(report) {
+      return stableJson(report, null);
+    }
+
+    function downloadChangelogCsv() {
+      if (!lastChangelog) return;
+      saveBlob("release-changelog.csv", buildChangelogCsv(lastChangelog), "text/csv");
+    }
+
+    function downloadChangelogJson() {
+      if (!lastChangelog) return;
+      saveBlob("release-changelog.json", buildChangelogJson(lastChangelog), "application/json");
+    }
+
     function renderComparison(report) {
       const drafts = report.drafts || [];
       const matrix = report.matrix || [];
@@ -1875,6 +2001,10 @@
     $("loadTrendSample").addEventListener("click", loadTrendSample);
     $("downloadTrendCsv").addEventListener("click", downloadTrendCsv);
     $("downloadTrendJson").addEventListener("click", downloadTrendJson);
+    $("runChangelog").addEventListener("click", runChangelog);
+    $("loadChangelogSample").addEventListener("click", loadChangelogSample);
+    $("downloadChangelogCsv").addEventListener("click", downloadChangelogCsv);
+    $("downloadChangelogJson").addEventListener("click", downloadChangelogJson);
     $("runCompare").addEventListener("click", runCompare);
     $("loadCompareSample").addEventListener("click", loadCompareSample);
     $("downloadComparisonCsv").addEventListener("click", downloadComparisonCsv);

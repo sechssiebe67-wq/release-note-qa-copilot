@@ -27,6 +27,7 @@ from .archive import (
     normalize_tag,
     validate_tag,
 )
+from .changelog import BANDS, compute_changelog
 from .config import WorkspaceConfig
 from .profiles import (
     BUILTIN_PROFILES,
@@ -67,6 +68,8 @@ from .score import compute_score
 from .exporters import (
     archive_csv,
     archive_json,
+    changelog_csv,
+    changelog_json,
     checklist_csv,
     comparison_csv,
     comparison_json,
@@ -94,6 +97,7 @@ from .storage import ArchiveStore, DraftStore, DraftVersionStore, ReviewStore
 from .service import (
     HistoryRequiredError,
     build_archive,
+    build_changelog,
     build_comparison,
     build_profile_comparison,
     build_trend,
@@ -175,6 +179,9 @@ __all__ = [
     "compute_diff",
     "compute_trend",
     "build_trend",
+    "BANDS",
+    "compute_changelog",
+    "build_changelog",
     "compute_comparison",
     "build_comparison",
     "compare_profiles",
@@ -191,6 +198,8 @@ __all__ = [
     "template_json",
     "trend_csv",
     "trend_json",
+    "changelog_csv",
+    "changelog_json",
     "draft_json",
     "comparison_csv",
     "comparison_matrix_csv",
@@ -227,4 +236,4 @@ __all__ = [
     "rollback_draft_version",
 ]
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"

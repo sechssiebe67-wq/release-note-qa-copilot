@@ -43,6 +43,10 @@ unsupported claims are flagged before publishing.
   findings (passive voice, first-person slips, ALL-CAPS, emoji, jargon, mixed
   tense, duplicate headings) and a bounded penalty folded into the release
   readiness score.
+- Roll up **2–50 releases** into one machine-readable **changelog digest**: per
+  release a title, date, band, publishable flag, flag counts, top flag codes and
+  a one-line summary, plus an overall `ready`/`review`/`risky` verdict and
+  CSV/JSON export.
 
 See [CONCEPT.md](CONCEPT.md) for the product goal, users and roadmap.
 
@@ -77,6 +81,9 @@ Configuration:
 | GET | `/api/compare/sample` | Example 2-draft comparison payload |
 | GET | `/api/compare-profiles/sample` | Example one-changelog profile-comparison payload |
 | GET | `/api/language/sample` | Example input payload that exercises the language lint |
+| GET | `/api/changelog/sample` | Example 3-release changelog payload |
+| GET | `/api/export/changelog.csv` | Changelog digest as CSV (`label,date,title,band,publishable,high,medium,low,total,entry_count,top_codes,summary`) |
+| GET | `/api/export/changelog.json` | Full changelog digest as JSON |
 | GET | `/api/export/language.csv` | Language findings as CSV (`code,severity,entry_id,message`) |
 | GET | `/api/export/language.json` | Full `language` object as JSON |
 | GET | `/api/export/qa.csv` | QA flags as CSV (`entry_id,code,severity,message`) |
@@ -118,6 +125,7 @@ Configuration:
 | POST | `/api/versions/diff` | Diff two versions of the same logical draft |
 | POST | `/api/versions/rollback` | Roll back to a stored version |
 | POST | `/api/trend` | Analyse an ordered list of 2–20 releases |
+| POST | `/api/changelog` | Build a changelog digest from 2–50 releases |
 | POST | `/api/compare` | Compare 2–10 candidate drafts |
 | POST | `/api/compare-profiles` | Compare one changelog across QA rule profiles |
 
@@ -1051,6 +1059,91 @@ and is valid for `POST /api/generate`. The browser UI renders a *Language* panel
 after a successful generate with the readability numbers, a grade badge, the
 findings table and *Download language CSV* / *Download language JSON* buttons.
 The language lint was added in **v0.15.0**; no third-party dependency is
+required.
+
+## Changelog digest
+
+A release manager shipping several releases has one QA-checked draft per
+release, but no single machine-readable "what shipped" rollup. `POST
+/api/changelog` takes **2–50** releases (each `{label, date?, content, format}`),
+QA-checks each release with the same rules as `POST /api/generate`, and returns
+one compact, publish-ready digest. Everything is deterministic and offline.
+
+```sh
+curl -X POST 'http://127.0.0.1:8080/api/changelog' \
+  -H 'Content-Type: application/json' \
+  -d '{"releases": [
+        {"label": "2026.1", "date": "2026-01-15", "format": "csv", "content": "id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,A much better experience,\n"},
+        {"label": "2026.2", "date": "2026-02-15", "format": "csv", "content": "id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,One-click export saves time,REL-1\n"}
+      ]}'
+```
+
+`profile`, `config` and `template` are all optional and resolve exactly like
+`POST /api/generate`. The response contains one row per release plus the overall
+counts and verdict:
+
+```json
+{
+  "releases": [
+    {
+      "label": "2026.1",
+      "date": "2026-01-15",
+      "title": "2026.1",
+      "band": "risky",
+      "publishable": false,
+      "counts": { "high": 1, "medium": 1, "low": 0, "total": 2 },
+      "top_codes": ["missing_source", "vague_language"],
+      "entry_count": 1,
+      "summary": "1 entry, 2 flags (1 high, 1 medium, 0 low); not publishable (risky)"
+    }
+  ],
+  "total_releases": 2,
+  "ready_count": 1,
+  "review_count": 0,
+  "risky_count": 1,
+  "overall_verdict": "risky"
+}
+```
+
+Each release row carries `label`, `date`, `title`, `band`, `publishable`,
+`counts` (`high`/`medium`/`low`/`total`), `top_codes` (up to three most frequent
+flag codes, ties broken by code ascending), `entry_count` and a non-empty
+one-line `summary`. `overall_verdict` is `ready` when every release is `ready`,
+`risky` when any release is `risky` and `review` otherwise. Bad input behaves
+like the rest of the API: a non-list `releases`, a missing `content` or `label`,
+more than 50 releases, an invalid `config` or an unknown `profile`/`template`
+returns HTTP 400, unparseable content returns HTTP 422 and a body over 2 MiB
+returns HTTP 413.
+
+Download the digest (repeat `release=label:content`, URL-encoded, oldest
+first):
+
+```sh
+curl -G 'http://127.0.0.1:8080/api/export/changelog.csv' \
+  --data-urlencode 'format=csv' \
+  --data-urlencode $'release=2026.1:id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,A much better experience,\n' \
+  --data-urlencode $'release=2026.2:id,type,title,description,benefit,source\nREL-1,feature,Bulk export,Export all reports,One-click export saves time,REL-1\n'
+```
+
+```csv
+label,date,title,band,publishable,high,medium,low,total,entry_count,top_codes,summary
+2026.1,,2026.1,risky,False,1,1,0,2,1,missing_source|vague_language,"1 entry, 2 flags (1 high, 1 medium, 0 low); not publishable (risky)"
+```
+
+`GET /api/changelog/sample` returns a valid 3-release payload that `POST
+/api/changelog` accepts unchanged. `GET /api/export/changelog.csv` / `.json`
+accept the same repeated `release` parameters plus an optional `format`,
+`profile`, `config` and `template`, and answer with a `Content-Disposition:
+attachment` header. The CSV uses `\n` line endings and RFC-4180 quoting so a
+summary containing commas, quotes or newlines round-trips through standard
+parsers.
+
+The browser UI adds a *Changelog* section: one release per block (same label
+line then CSV/JSON content shape as *Trend*, blocks separated by a blank line),
+a per-release table with a band badge, the overall verdict and the
+`ready`/`review`/`risky` counts, and *Download changelog CSV* / *Download
+changelog JSON* buttons built in the browser from the returned payload. The
+changelog digest was added in **v0.16.0**; no third-party dependency is
 required.
 
 ## Input format

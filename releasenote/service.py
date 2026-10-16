@@ -5,6 +5,11 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 
 from .archive import filter_drafts, validate_tag
+from .changelog import (
+    MAX_RELEASES as CHANGELOG_MAX_RELEASES,
+    MIN_RELEASES as CHANGELOG_MIN_RELEASES,
+    compute_changelog,
+)
 from .compare import compute_comparison
 from .config import WorkspaceConfig, sample_config
 from .diff import compute_diff
@@ -442,6 +447,70 @@ def build_comparison(payload: Dict[str, Any]) -> Dict[str, Any]:
     return report
 
 
+def build_changelog(
+    releases: Any,
+    config: ConfigInput = None,
+    profile: Optional[str] = None,
+    template: Optional[Union[ReleaseTemplate, str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Build a changelog digest from a list of 2–50 release payloads.
+
+    Each release is a ``{label, content, format, date?}`` mapping. Its
+    ``content`` is parsed and QA-checked by :func:`build_draft` under the
+    resolved ``config``/``profile``/``template`` (so a release scores exactly
+    like the same content through ``POST /api/generate``) and the resulting
+    draft is folded into the digest by
+    :func:`releasenote.changelog.compute_changelog`. A missing title falls back
+    to the release label.
+
+    Raises :class:`ValueError` for a malformed release list/config/template,
+    :class:`releasenote.profiles.UnknownProfileError` for an unknown profile
+    and :class:`releasenote.importer.ParseError` for unparseable content.
+    """
+    if not isinstance(releases, list):
+        raise ValueError("'releases' must be a list of release objects")
+    if (
+        len(releases) < CHANGELOG_MIN_RELEASES
+        or len(releases) > CHANGELOG_MAX_RELEASES
+    ):
+        raise ValueError(
+            "'releases' must contain between {} and {} releases".format(
+                CHANGELOG_MIN_RELEASES, CHANGELOG_MAX_RELEASES
+            )
+        )
+
+    drafts: List[Dict[str, Any]] = []
+    for index, item in enumerate(releases):
+        position = index + 1
+        if not isinstance(item, dict):
+            raise ValueError("release {} must be an object".format(position))
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError(
+                "release {} requires non-empty 'content'".format(position)
+            )
+        fmt = item.get("format", "auto")
+        if not isinstance(fmt, str):
+            raise ValueError(
+                "release {} 'format' must be a string".format(position)
+            )
+        label = item.get("label")
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError(
+                "release {} requires a non-empty 'label'".format(position)
+            )
+        title = item.get("title")
+        if not isinstance(title, str) or not title.strip():
+            title = label
+        draft = build_draft(content, fmt, title, config, profile, template)
+        draft["label"] = label.strip()
+        date = item.get("date")
+        draft["date"] = date.strip() if isinstance(date, str) else ""
+        drafts.append(draft)
+
+    return compute_changelog(drafts)
+
+
 def build_profile_comparison(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Validate ``payload`` and compare one changelog across rule profiles.
 
@@ -587,6 +656,57 @@ def sample_profile_comparison() -> Dict[str, Any]:
             "REL-2,fix,Timezone fix,Timestamps render in local time,"
             "Correct local times,REL-2\n"
         ),
+    }
+
+
+def sample_changelog() -> Dict[str, Any]:
+    """Return a three-release example payload for ``GET /api/changelog/sample``.
+
+    The releases move from risky (unsourced, vague) through review (sourced but
+    vague) to ready (clean), so the sample exercises every band and the overall
+    verdict, and is valid input for ``POST /api/changelog``.
+    """
+    return {
+        "releases": [
+            {
+                "label": "2026.1",
+                "date": "2026-01-15",
+                "format": "csv",
+                "content": (
+                    "id,type,title,description,benefit,source\n"
+                    "REL-1,feature,Bulk export,Export all reports in one click,"
+                    "A much better experience,\n"
+                    "REL-2,fix,Timezone fix,Timestamps render in local time,"
+                    "No more confusing dates,\n"
+                    "REL-3,feature,Better search,Search is improved,"
+                    "Find things faster,\n"
+                ),
+            },
+            {
+                "label": "2026.2",
+                "date": "2026-02-15",
+                "format": "csv",
+                "content": (
+                    "id,type,title,description,benefit,source\n"
+                    "REL-1,feature,Bulk export,Export all reports in one click,"
+                    "A much better experience,\n"
+                    "REL-2,fix,Timezone fix,Timestamps render in local time,"
+                    "Correct local times,REL-2\n"
+                ),
+            },
+            {
+                "label": "2026.3",
+                "date": "2026-03-15",
+                "format": "csv",
+                "content": (
+                    "id,type,title,description,benefit,source\n"
+                    "REL-1,feature,Bulk export,Export all reports in one click,"
+                    "One-click export saves time,REL-1\n"
+                    "REL-2,fix,Timezone fix,Timestamps render in local time,"
+                    "Correct local times,REL-2\n"
+                ),
+            },
+        ]
     }
 
 

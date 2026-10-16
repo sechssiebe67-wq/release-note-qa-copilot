@@ -40,6 +40,23 @@ TREND_HEADER = (
     "banned_hits",
 )
 
+# The changelog digest, one row per release, with its top flag codes joined by
+# ``|``.
+CHANGELOG_HEADER = (
+    "label",
+    "date",
+    "title",
+    "band",
+    "publishable",
+    "high",
+    "medium",
+    "low",
+    "total",
+    "entry_count",
+    "top_codes",
+    "summary",
+)
+
 # The comparison per-draft table reuses the trend schema so spreadsheets keep
 # one shape; the matrix adds the per-draft presence columns after these.
 COMPARISON_HEADER = TREND_HEADER
@@ -375,6 +392,48 @@ def trend_json(report: Mapping[str, Any]) -> str:
     )
 
 
+def changelog_csv(report: Mapping[str, Any]) -> str:
+    """Return one CSV row per release in the changelog digest.
+
+    Header: ``label,date,title,band,publishable,high,medium,low,total,
+    entry_count,top_codes,summary``. Flag codes are joined by ``|``. A report
+    without a ``releases`` list yields just the header row, so the shape is
+    always stable.
+    """
+    rows = []
+    for item in _as_list(_as_mapping(report).get("releases")):
+        release = _as_mapping(item)
+        counts = _as_mapping(release.get("counts"))
+        top_codes = _as_list(release.get("top_codes"))
+        rows.append(
+            (
+                release.get("label", ""),
+                release.get("date", ""),
+                release.get("title", ""),
+                release.get("band", ""),
+                release.get("publishable", False),
+                counts.get("high", 0),
+                counts.get("medium", 0),
+                counts.get("low", 0),
+                counts.get("total", 0),
+                release.get("entry_count", 0),
+                "|".join(str(code) for code in top_codes),
+                release.get("summary", ""),
+            )
+        )
+    return _render_csv(CHANGELOG_HEADER, rows)
+
+
+def changelog_json(report: Mapping[str, Any]) -> str:
+    """Serialise a changelog digest as stable, UTF-8 JSON without NaN."""
+    return json.dumps(
+        report,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
 def draft_json(payload: Mapping[str, Any]) -> str:
     """Serialise the full payload as stable, UTF-8 JSON without NaN values."""
     return json.dumps(
@@ -593,6 +652,7 @@ __all__ = [
     "LANGUAGE_HEADER",
     "TEMPLATE_HEADER",
     "TREND_HEADER",
+    "CHANGELOG_HEADER",
     "COMPARISON_HEADER",
     "COMPARISON_MATRIX_HEADER",
     "PROFILE_COMPARISON_HEADER",
@@ -613,6 +673,8 @@ __all__ = [
     "template_json",
     "trend_csv",
     "trend_json",
+    "changelog_csv",
+    "changelog_json",
     "draft_json",
     "comparison_csv",
     "comparison_matrix_csv",
